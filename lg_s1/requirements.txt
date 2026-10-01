@@ -1,0 +1,20 @@
+# Stage S1 (verification harness, downloader, zero-shot harness).  Tested with:
+#   python 3.11, torch 2.14 (cpu) / transformers 5.17, datasets 5.0  -- and the manual forward path also
+#   handles transformers 4.4x-4.5x (tuple layer outputs).  Install into the v0.4 venv:
+#   $LG_PYTHON -m pip install -r requirements.txt
+torch>=2.1
+transformers>=4.51
+accelerate>=0.30
+tokenizers>=0.19
+safetensors>=0.4
+huggingface_hub>=0.23
+datasets>=2.19
+numpy>=1.24
+pandas>=2.0
+pyarrow>=14
+pyyaml>=6
+packaging>=23
+pytest>=7
+# optional
+# kernels            # MXFP4 kernels for gpt-oss-safeguard-20b on Hopper; Ada falls back to bf16 dequant
+# vllm               # not needed in S1 (HF generate is enough for 4.6k prompts x 12 guards)

@@ -1,0 +1,13 @@
+# hand-over: the env file carries machine paths and (optionally) an HF token; env/s1.env.example is the template
+env/s1.env
+__pycache__/
+*.pyc
+.pytest_cache/
+*.tmp
+docs/.s8_project_doc.md
+.venv/
+*.zip
+*.tar.gz
+*.rows.jsonl
+*.pt
+*.npz

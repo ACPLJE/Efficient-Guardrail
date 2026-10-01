@@ -1,0 +1,60 @@
+# Published prompt-classification F1 (harmful class, %) used by E0-6 (target: |ours - published| <= 1.0 pt).
+# Sources: experiment report §2.2 (Qwen3Guard Table 2, GuardReasoner Table 2) and §2.1 rows.
+# `mode` = how "controversial" is counted for Qwen3Guard (loose: controversial -> safe).  Qwen3Guard reports
+# loose for ToxicChat / OpenAI Mod and strict (controversial -> unsafe) for the other benchmarks (report §2.2);
+# confirmed 2026-09-17: 0.6B WGTest strict 87.85 vs published 87.7.
+# Benchmark sizes the published numbers use: WGTest 1,725 prompts; ToxicChat 0124 test human-annotated 2,853 (362 toxic).
+expected_n: {wgtest: 1725, toxicchat: 2853}
+# null = no primary-source number at hand -> fill from the paper / model card before the row enters Table 3;
+# the harness still records ours and marks the comparison "n/a".
+tolerance_pt: 1.0
+
+guards:
+  qwen3guard_gen_0.6b:
+    toxicchat: {f1: 77.7, mode: loose, source: "Qwen3Guard Table 2 (loose)"}
+    wgtest:    {f1: 87.7, mode: strict, source: "Qwen3Guard Table 2 (strict)"}
+  qwen3guard_gen_4b:
+    toxicchat: {f1: null, mode: loose, source: "Qwen3Guard Table 2 — fill in"}
+    wgtest:    {f1: null, mode: strict, source: "Qwen3Guard Table 2 (strict) — fill in"}
+  qwen3guard_gen_8b:
+    toxicchat: {f1: 82.8, mode: loose, source: "Qwen3Guard Table 2 (loose)"}
+    wgtest:    {f1: 88.9, mode: strict, source: "Qwen3Guard Table 2 (strict)"}
+  qwen3guard_stream_8b:
+    toxicchat: {f1: null, mode: strict, source: "Qwen3Guard report gives prompt avg 88.3 only"}
+    wgtest:    {f1: null, mode: strict, source: "fill in if per-bench numbers exist"}
+  wildguard_7b:
+    toxicchat: {f1: 70.8, mode: loose, source: "GuardReasoner Table 2"}
+    wgtest:    {f1: 88.9, mode: loose, source: "WildGuard paper / GuardReasoner Table 2"}
+  guardreasoner_8b:
+    toxicchat: {f1: 78.8, mode: loose, source: "GuardReasoner Table 2"}
+    wgtest:    {f1: 89.2, mode: loose, source: "GuardReasoner Table 2"}
+  llamaguard3_8b:
+    toxicchat: {f1: 53.8, mode: loose, source: "GuardReasoner Table 2"}
+    wgtest:    {f1: 76.4, mode: loose, source: "GuardReasoner Table 2"}
+  llamaguard3_1b:
+    toxicchat: {f1: null, mode: loose, source: "fill in"}
+    wgtest:    {f1: null, mode: loose, source: "fill in"}
+  llamaguard4_12b:
+    toxicchat: {f1: null, mode: loose, source: "model card reports internal test only"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  polyguard_qwen_7b:
+    toxicchat: {f1: null, mode: loose, source: "PolyGuard paper — fill in"}
+    wgtest:    {f1: null, mode: loose, source: "PolyGuard paper — fill in"}
+  granite_guardian_3.3_8b:
+    toxicchat: {f1: null, mode: loose, source: "Granite Guardian reports pooled AUC/F1 only"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  gpt_oss_safeguard_20b:
+    toxicchat: {f1: 79.9, mode: loose, source: "gpt-oss-safeguard technical report (ToxicChat F1 79.9, 20b)"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  nemotron_safety_guard_v3:
+    toxicchat: {f1: null, mode: loose, source: "fill in (Aegis 2.0 paper reports its v2 model: WGTest prompt 0.821)"}
+    wgtest:    {f1: null, mode: loose, source: "Aegis 2.0 Table (v2 model) 82.1 — v3 may differ; confirm on the v3 card"}
+  shieldgemma_9b:
+    toxicchat: {f1: null, mode: loose, source: "ShieldGemma reports optimal-F1/AU-PRC on its own prompt set"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  bingoguard_8b:
+    toxicchat: {f1: 75.7, mode: loose, source: "BingoGuard paper (§2.1 row)"}
+    wgtest:    {f1: 88.9, mode: loose, source: "BingoGuard paper (§2.1 row)"}
+  prompt_guard_2_86m:
+    toxicchat: {f1: null, mode: loose, source: "jailbreak detector, not comparable"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}

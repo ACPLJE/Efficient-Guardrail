@@ -1,0 +1,69 @@
+# Published prompt-classification F1 (harmful class, %) used by E0-6 (target: |ours - published| <= 1.0 pt).
+# Sources: experiment report §2.2 (Qwen3Guard Table 2, GuardReasoner Table 2) and §2.1 rows.
+# `mode` = how "controversial" is counted for Qwen3Guard (loose: controversial -> safe).  Qwen3Guard reports
+# loose for ToxicChat / OpenAI Mod and strict (controversial -> unsafe) for the other benchmarks (report §2.2);
+# confirmed 2026-09-17: 0.6B WGTest strict 87.85 vs published 87.7.
+# Benchmark sizes the published numbers use: WGTest 1,725 prompts; ToxicChat 0124 test human-annotated 2,853 (362 toxic).
+expected_n: {wgtest: 1725, toxicchat: 2853}
+# null = no primary-source number at hand -> fill from the paper / model card before the row enters Table 3;
+# the harness still records ours and marks the comparison "n/a".
+tolerance_pt: 1.0
+
+guards:
+  # f1_other = the paper's number for the other controversial mode (informational; PASS/FAIL uses `f1`+`mode`).
+  qwen3guard_gen_0.6b:
+    toxicchat: {f1: 77.7, f1_other: 65.1, mode: loose, source: "Qwen3Guard Table 2 (loose)"}
+    wgtest:    {f1: 87.7, f1_other: 85.1, mode: strict, source: "Qwen3Guard Table 2 (strict)"}
+  # 4B filled 2026-09-17 from arXiv 2510.14276 Table 2 (ToxiC strict 69.5 / loose 82.8; WildG strict 85.6 / loose 85.1).
+  # The paper's 4B WildG strict number (85.6) sits below its own 0.6B (87.7) and 8B (88.9); our 4B strict = 88.7 (+3.1)
+  # while 0.6B/8B strict reproduce within 0.15 pt -> report both modes in Table 3 and footnote it (M1 sign-off).
+  qwen3guard_gen_4b:
+    toxicchat: {f1: 82.8, f1_other: 69.5, mode: loose, source: "Qwen3Guard Table 2 (loose; strict 69.5)"}
+    wgtest:    {f1: 85.6, f1_other: 85.1, mode: strict, source: "Qwen3Guard Table 2 (strict; loose 85.1 — see note)"}
+  qwen3guard_gen_8b:
+    toxicchat: {f1: 82.8, f1_other: 68.9, mode: loose, source: "Qwen3Guard Table 2 (loose)"}
+    wgtest:    {f1: 88.9, f1_other: 85.6, mode: strict, source: "Qwen3Guard Table 2 (strict)"}
+  qwen3guard_stream_8b:   # same convention as the Gen models: ToxicChat loose, WildGuardTest strict (report gives no per-bench Stream numbers)
+    toxicchat: {f1: null, mode: loose, source: "Qwen3Guard report: Stream per-bench numbers not published (prompt avg 88.3 only) -> Table 3 'ours only'"}
+    wgtest:    {f1: null, mode: strict, source: "not published -> Table 3 'ours only' (sanity: within ~1pt of Gen-8B strict)"}
+  wildguard_7b:
+    toxicchat: {f1: 70.8, mode: loose, source: "GuardReasoner Table 2"}
+    wgtest:    {f1: 88.9, mode: loose, source: "WildGuard paper / GuardReasoner Table 2"}
+  guardreasoner_8b:
+    toxicchat: {f1: 78.8, mode: loose, source: "GuardReasoner Table 2"}
+    wgtest:    {f1: 89.2, mode: loose, source: "GuardReasoner Table 2"}
+  llamaguard3_8b:
+    toxicchat: {f1: 53.8, mode: loose, source: "GuardReasoner Table 2"}
+    wgtest:    {f1: 76.4, mode: loose, source: "GuardReasoner Table 2"}
+  llamaguard3_1b:
+    toxicchat: {f1: null, mode: loose, source: "fill in"}
+    wgtest:    {f1: null, mode: loose, source: "fill in"}
+  llamaguard4_12b:
+    toxicchat: {f1: null, mode: loose, source: "model card reports internal test only"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  polyguard_qwen_7b:   # checked 2026-09-17 (arXiv 2504.04377): only multilingual suites + OpenAI-Mod response F1; no WGTest/ToxicChat prompt number
+    toxicchat: {f1: null, mode: loose, source: "PolyGuard paper reports no ToxicChat prompt F1 -> Table 3 'ours only'"}
+    wgtest:    {f1: null, mode: loose, source: "PolyGuard paper reports no WGTest prompt F1 -> Table 3 'ours only'"}
+  granite_guardian_3.3_8b:
+    toxicchat: {f1: null, mode: loose, source: "Granite Guardian reports pooled AUC/F1 only"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  gpt_oss_safeguard_20b:
+    # 2026-09-18: ours 54.8 with the generic policy in guards.GPT_OSS_POLICY (reasoning_effort=low).  The report's 79.9 was
+    # obtained with "a short hand-written prompt adapted from some of our internal policies" that is not published, on an
+    # unspecified ToxicChat split, effort and output format; independent replications with their own policies report ~65.
+    # -> not reproducible from public information; shown for reference, Table 3 row = "ours only (generic policy)".
+    toxicchat: {f1: 79.9, mode: loose, reproducible: false,
+                source: "gpt-oss-safeguard technical report Table 2 (20b 79.9) — policy prompt unpublished; ours = generic policy P0, effort low"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  nemotron_safety_guard_v3:   # checked 2026-09-17: the v3 card reports only Nemotron-Safety-Guard-Dataset-v3 / PolyGuardPrompts / RTP-LX / MultiJail / XSafety / Aya
+    toxicchat: {f1: null, mode: loose, source: "v3 card: no ToxicChat number -> Table 3 'ours only'"}
+    wgtest:    {f1: null, mode: loose, source: "v3 card: no WGTest number; Aegis 2.0 paper's v2 model 82.1 as a proxy only (ours 83.6)"}
+  shieldgemma_9b:
+    toxicchat: {f1: null, mode: loose, source: "ShieldGemma reports optimal-F1/AU-PRC on its own prompt set"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
+  bingoguard_8b:
+    toxicchat: {f1: 75.7, mode: loose, source: "BingoGuard paper (§2.1 row)"}
+    wgtest:    {f1: 88.9, mode: loose, source: "BingoGuard paper (§2.1 row)"}
+  prompt_guard_2_86m:
+    toxicchat: {f1: null, mode: loose, source: "jailbreak detector, not comparable"}
+    wgtest:    {f1: null, mode: loose, source: "n/a"}
