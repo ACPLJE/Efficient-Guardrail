@@ -4,6 +4,17 @@
 
 값의 출처 표기: \[측정\] 우리가 잰 값(이 문서에서는 2026-10-10에 clone한 저장소에서 센 값 포함), \[계산\] 산술로 얻은 값, \[문헌\] 논문·문서·소스 코드에서 확인한 값, \[추정\] 근거가 약한 어림값, \[해석\] 사실에서 끌어낸 판단. 통과 기준은 모두 제안값이다. 이 문서는 코드를 담지 않는다.
 
+## 개정 이력
+
+**2026-10-10 개정 1** — 결정 D-001(Python 3.11 venv 하나), D-002(collaborator 없음, 모든 단계 담당 강지의)를 반영했다. 아래 본문의 해당 문장은 고쳤고, 고친 내용의 근거는 `docs/DECISIONS.md`에 있다. 인터페이스·지표·결과 스키마는 `docs/SPEC.md`가 기준이다.
+
+- **Python**: "2-venv 경계"와 "Python 3.9 문법·numpy-only 핵심 모듈" 규칙을 폐기했다. AG 코드는 3.11 venv 하나에 설치하고, AttnTrace만 별도 venv(파일·subprocess 경계)다. CI는 3.11 단일이다. SGLang·AgentDojo가 `requires-python >= 3.10`인 것은 pyproject로 확인했다 \[문헌\].
+- **1인 수행의 영향**: 엔진 트랙(S1E, S3E, S8g)과 하네스 트랙(S2, S3)이 병렬이 아니라 한 사람의 직렬 작업이 된다. 코드는 Claude가 이 저장소 세션에서 쓰므로 병목은 클러스터에서 job을 제출·확인하는 사람 시간이다 \[해석\]. 순서를 다음처럼 조정한다.
+  - **W0 (G0까지)**: S0 → S1 → S2 순서가 우선이다. S1E 엔진 spike는 스크립트 하나와 GPU job 하나로 줄여 S2의 1요청 실측(③)과 같은 날 제출한다. 무수정 엔진 B0 플러그인과 patch v0는 G0 뒤(10/19–21)로 민다. E0.4(10/25)는 그대로다.
+  - **W1–W2 (G1까지)**: G1 기준 세 개(E2.1, E2.2(a), E2.3 32k 1점)를 내는 S3E를 먼저 하고, S3 런타임(judge pool, gate, AG 플러그인, smoke)을 그다음에 한다. S3b 동기 그림은 GPU job만 던져 두고 분석은 G1 뒤로 미룬다. S3c Table 4는 B1a(J1)·B3 두 행만 11/1까지, 나머지는 11/8.
+  - **G1 위험**: 한 사람이 2주에 엔진 ledger와 런타임을 모두 맞춰야 하므로 G1 항목 중 end-to-end smoke가 가장 늦을 수 있다. 미달이면 계획서 10.2절의 11/4 재측정 규칙을 그대로 따르고 기준은 바꾸지 않는다(D-002).
+  - **선택 단계**: S8g(vLLM)는 원래 축소 1순위(cut-1)였고, 1인 수행에서는 사실상 하지 않는 것으로 본다.
+
 ## 0. 한눈에 보기
 
 **무엇을 알아봤나.** OSDI '24·'25·'26, SOSP '24, FAST '25, MLSys '24의 LLM serving 논문 artifact 12개와 우리가 직접 쓰는 baseline·벤치마크 저장소 2개를 clone해 읽었다(1절). 결론은 세 가지다. (1) 심사자가 보는 "functional"의 실제 수준은 "명령 하나로 결과 파일이 나오고 그림이 재생된다"이고, 그 수준에 못 미친 artifact가 절반이다(README가 가리키는 디렉터리 부재, 그림 스크립트 0개, 테스트 0개). (2) 상위 artifact가 공통으로 하는 것은 지표를 기호와 식으로 문서화하고, 측정을 시스템 밖(typed event 또는 순수 HTTP 클라이언트)에 두고, 참조 구현 대비 차등 테스트를 CI gate로 쓰는 것이다. (3) 14개 중 실행 lineage(commit·config·env·GPU·model sha)를 한 파일에 모두 적는 곳, mock 모델로 데이터→그림까지 CPU에서 통과하는 테스트, 초록 수치 자동 생성은 0개다 \[측정\]. 이 셋이 우리 차별점이다.
@@ -12,11 +23,11 @@
 
 **무엇을 돌려야 하나.** 그림 16개·표 4개·초록 수치 7개를 만드는 실험은 계획서의 33개에 실험 번호가 없던 작업 5개(grader 검증, Mooncake 집계, 128k 300건, G1 smoke, Table 4 이식 검증)를 더한 38개다(3절). 합계 1,569 GPU-h \[계산, 계획서 값\]이고 W3–W4의 E3.1(660)이 병목이다.
 
-**어떤 순서로 만드나.** 달력이 아니라 의존 관계로 자른 단계 S0–S7 + 선택 S8a–g다(4절). S0 계약·자산(10/12) → S1 걷는 뼈대: mock 요청 하나가 config→events→지표→results/lineage→Fig. 9→numbers까지 CPU에서 60초(10/14) → S2 E0 임계 경로(참조 구현만, G0 10/18)와 S1E 엔진 spike(collaborator, 1요청 `attn_lse` 반출로 G1 위험을 G0 시점에 퇴출)를 병행 → S3E 엔진 ledger·차등 테스트(G1)와 S3 런타임 조립(G1)을 병행 → S4 Table 2(G2) → S5 goodput(G3) → S6 공격·민감도(G4) → S7 집필·동결. go/no-go를 바꾸지 않는 실험은 부속 단계(S2b·S3b·S4b·S5b)로 뒤에 둔다. 모든 주가 672 GPU-h 안에 든다 \[계산\].
+**어떤 순서로 만드나.** 달력이 아니라 의존 관계로 자른 단계 S0–S7 + 선택 S8a–g다(4절). S0 계약·자산(10/12) → S1 걷는 뼈대: mock 요청 하나가 config→events→지표→results/lineage→Fig. 9→numbers까지 CPU에서 60초(10/14) → S2 E0 임계 경로(참조 구현만, G0 10/18)와 S1E 엔진 spike(1요청 `attn_lse` 반출로 G1 위험을 G0 시점에 퇴출)를 병행 → S3E 엔진 ledger·차등 테스트(G1)와 S3 런타임 조립(G1)을 병행 → S4 Table 2(G2) → S5 goodput(G3) → S6 공격·민감도(G4) → S7 집필·동결. go/no-go를 바꾸지 않는 실험은 부속 단계(S2b·S3b·S4b·S5b)로 뒤에 둔다. 모든 주가 672 GPU-h 안에 든다 \[계산\].
 
-**브랜치.** main 직접 push 금지, 작업마다 `<주제>/<설명>` 브랜치 + PR, main 불변식은 CPU 테스트 두 명령 green. collaborator의 `engine/*`는 patch 1개 + shim으로만 들어오고 접점 6개(Record v1, LedgerSink, ReleaseGate hook, info(), E2.3 계약, E0.4 합성)에서만 하네스와 만난다. 게이트마다 태그(`g0-2026-10-18` …), `freeze-2026-11-30` 뒤에는 그림·문서 렌더링만(5절).
+**브랜치.** main 직접 push 금지, 작업마다 `<주제>/<설명>` 브랜치 + PR, main 불변식은 CPU 테스트 두 명령 green. 엔진 변경 `engine/*`는 patch 1개 + shim으로만 들어오고 접점 6개(Record v1, LedgerSink, ReleaseGate hook, info(), E2.3 계약, E0.4 합성)에서만 하네스와 만난다. 게이트마다 태그(`g0-2026-10-18` …), `freeze-2026-11-30` 뒤에는 그림·문서 렌더링만(5절).
 
-**지금 결정할 것.** Python 3.9/3.10 venv 구조, Record 스키마, TTFV의 sink 점, grader LLM, AgentDojo-L과 gated 모델의 G0 fallback, 계획서 10.1 일정 이탈 7건 등 20개(6.1절). 첫 주 행동 순서는 6.2절.
+**지금 결정할 것.** Python은 3.11 venv 하나로 결정됐다(D-001). 남은 것은 Record 스키마, TTFV의 sink 점, grader LLM, AgentDojo-L과 gated 모델의 G0 fallback, 계획서 10.1 일정 이탈 7건 등 20개(6.1절). 첫 주 행동 순서는 6.2절.
 
 ## 1. 시스템 논문 공개 코드 14개 조사
 
@@ -171,7 +182,7 @@ docs/                        # SPEC.md, DECISIONS.md, metrics.md, AE.md
 
 **`ag/judges/`**: `Judge.verdict(task, window, chunk) -> (bool, score, latency)`; `prompt_guard2.py`(J1), `agentwatcher_monitor.py`(J2), `piguard.py`(J3), `datasentinel.py`(J4, OPI `apps/DataSentinelDetector.py` 포팅), `mock_judge.py`.
 
-**`ag/data/`**: `lc_inject/`(생성기 3단: 요청 jsonl → 시스템 출력 jsonl → 채점; payload 템플릿은 OPI `attackers/*`; canary로 주입 가시성 확인), `agentdojo_l.py`(`tool_output_formatter` hook으로 길이 확장; AgentDojo는 Python ≥ 3.10이라 별도 venv + pair JSON 읽기), `traces/mooncake.py`(4필드 로더 + 결정적 hash_id→토큰 확장, explicit RNG), `arrivals.py`(poisson/gamma/trace, 사전 계산 + 정규화, seed 기록), `manifest.py`(길이 분위수·공격 비율·sha → `data_manifest_sha`). `tests/data/`에 각 trace 50줄 절단본 커밋.
+**`ag/data/`**: `lc_inject/`(생성기 3단: 요청 jsonl → 시스템 출력 jsonl → 채점; payload 템플릿은 OPI `attackers/*`; canary로 주입 가시성 확인), `agentdojo_l.py`(`tool_output_formatter` hook으로 길이 확장; AgentDojo는 3.11 주 venv에 함께 설치하고 pair JSON을 읽음(D-001)), `traces/mooncake.py`(4필드 로더 + 결정적 hash_id→토큰 확장, explicit RNG), `arrivals.py`(poisson/gamma/trace, 사전 계산 + 정규화, seed 기록), `manifest.py`(길이 분위수·공격 비율·sha → `data_manifest_sha`). `tests/data/`에 각 trace 50줄 절단본 커밋.
 
 **`ag/metrics/`**: `per_request.py`(TTFT_gen, TTFV, release_lag, TPOT_visible, exposed_tokens, judged_windows), `quality.py`(ASR, FPR, utility, hit@k; 기존 `lgs1/metrics.py:strict_matched_fpr` 재사용), `goodput.py`, `aggregate.py`(`results/raw/**` → run당 1행 parquet). `names.py`의 enum 하나에서 JSONL 키·`numbers.json`·그림 파일명·`docs/metrics.md` 표를 생성한다(vidur `constants.py`).
 
@@ -255,7 +266,7 @@ AG 확장 정의(요청 r, chunk j, 창 w, chunk 토큰 수 n_j, release된 chun
 | B5 | MELON | AgentDojo pipeline element로 실행, pair JSON을 하네스가 읽어 ASR/utility 열만 |
 | N1–N6 | 우리 코드 | `configs/systems/ag_n1.yaml` 오버레이 |
 
-공통 규칙: 공정성 knob(`kv_capacity_tokens, ignore_eos, max_output_len, max_seq_len, chunked_prefill_size`)는 YAML 필드로 config_hash에 들어간다. 외부 모델을 쓰는 baseline(B2–B4)은 GPU 메모리와 추가 pass 시간을 이벤트 payload로 낸다. Python 3.9 제약으로 AgentDojo(≥ 3.10), AttnTrace(3.10 pin)는 **분리 venv + 파일/HTTP 경계**가 기본이다. 포팅 시 함정: attntrace 전역 `set_default_tensor_type`, `wait_for_available_gpu_memory` 300 s 폴링; OPI `CUDA_VISIBLE_DEVICES` 덮어쓰기, 동시성 제한 없는 Popen; agentdojo `LocalLLM`의 기록되지 않는 seed, 오류를 ASR에 합치는 `benchmark.py`.
+공통 규칙: 공정성 knob(`kv_capacity_tokens, ignore_eos, max_output_len, max_seq_len, chunked_prefill_size`)는 YAML 필드로 config_hash에 들어간다. 외부 모델을 쓰는 baseline(B2–B4)은 GPU 메모리와 추가 pass 시간을 이벤트 payload로 낸다. AttnTrace(Python 3.10.15·torch 2.5.1 고정)만 **분리 venv + 파일 경계**로 부른다. 나머지는 3.11 주 venv에 함께 둔다(D-001). 포팅 시 함정: attntrace 전역 `set_default_tensor_type`, `wait_for_available_gpu_memory` 300 s 폴링; OPI `CUDA_VISIBLE_DEVICES` 덮어쓰기, 동시성 제한 없는 Popen; agentdojo `LocalLLM`의 기록되지 않는 seed, 오류를 ASR에 합치는 `benchmark.py`.
 
 ## 3. 그림·표·실험 전체 목록과 정렬
 
@@ -346,7 +357,7 @@ AG 확장 정의(요청 r, chunk j, 창 w, chunk 토큰 수 n_j, release된 chun
 
 코드를 쓰기 전에 정해야 하는 것들이다. CLAUDE.md 3.6에 따라 `docs/DECISIONS.md`에 적고 확인을 받는다.
 
-1. **Python 버전.** 클러스터 venv는 3.9인데 SGLang 0.5.x, AgentDojo 0.1.35(requires-python ≥ 3.10), AttnTrace(3.10 pin)는 3.10 이상이 필요해 보인다 [추정, 로그인 노드에서 확인 필요]. 선택지는 (a) 하네스 3.9 + 엔진·AgentDojo·AttnTrace 별도 3.10 venv, 파일/HTTP 경계로만 만남, (b) 전부 3.10으로 올림(CLAUDE.md 4절 변경). 권장은 (a)로 시작하되 하네스도 3.10 호환으로 쓰고, 확인 뒤 (b)로 합치는 것이다.
+1. **Python 버전.** 결정됨(D-001): AG 코드는 Python 3.11 venv 하나, AttnTrace만 별도 venv. SGLang main과 AgentDojo 0.1.35는 `requires-python >= 3.10`, AttnTrace는 Python 3.10.15 고정이다 [문헌: pyproject·environment.yml].
 2. **E4.3–E4.7, E4.4의 AG judge.** 계획서가 judge를 명시하지 않는다. 성능 실험의 기본 judge를 J1(Prompt Guard 2, 작은 분류기)로 통일하고 Fig. 1의 AG+J2 TTFV는 E4.2에서 양쪽 judge를 돌려 채우는 안. E4.5 ablation의 workload도 미명시(W-QA로 가정).
 3. **Fig. 5와 Fig. 8의 출처.** 2.3절 C4는 Fig. 5를 E3.5·E4.6의 산출로 적지만 9.1절은 E0.4·E1.4만 든다. E1.4(W2)는 release 시각을 그리므로 엔진의 release gate에 의존해 CLAUDE.md 원칙 2(동기 그림은 엔진 없이)와 어긋난다. 권장: Fig. 5는 E0.4(무수정 엔진)로, Fig. 8은 E4.1(엔진)로 분리하고 E1.4는 Fig. 8의 초안으로 둔다.
 4. **E0.1 표본 수와 집계.** "8k와 32k, 공격 600 + 정상 300"이 길이별인지 합계인지, G0의 hit@8이 chunk 3종(첫 8, 첫 32, 전체) 중 어느 것인지 불명(집계는 C로 지정). 128k 표본은 E0.1 100개, G1 300개.
@@ -369,10 +380,10 @@ AG 확장 정의(요청 r, chunk j, 창 w, chunk 토큰 수 n_j, release된 chun
 ### 4.0 모양
 
 ```
-S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike [collab] ─┐
+S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike ─────────┐
                                             ├─ S2  E0 임계 경로 (G0 10/18) ┤
                                             └─ S2b E0.3·E0.4 (부속)       ┘
-        ┌─ S3E 엔진 ledger·E2.1–E2.3 [collab] (G1 11/1) ─┐
+        ┌─ S3E 엔진 ledger·E2.1–E2.3 (G1 11/1) ─────────┐
         ├─ S3  런타임 조립·smoke·128k·E1.4 (G1 11/1)      ┤
         ├─ S3b 동기 그림 E1.1–E1.3·E1.5 (부속, ≤11/8)     ┤
         └─ S3c baseline 이식·Table 4 (≤11/1)             ┘
@@ -402,7 +413,7 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 
 ### 4.1 걷는 뼈대 (S1, 전부 CPU·pytest, 실제 모델·데이터·엔진 없음)
 
-**정의.** mock 요청 1건이 config → registry → MockSystem → events → hit@k → `$AG_OUT/raw/mock/<run_id>/`(lineage.json 포함) → `plots/fig09.py` → `fig09.pdf` + `numbers.json`(stub)을 60초 안에 통과한다. Python 3.9 문법으로 쓴다(`from __future__ import annotations`, `X | Y`·`match` 금지). `ag/`의 핵심 모듈(selector, runtime, reference/record, metrics, config)은 numpy만 의존하게 두어 두 venv(3.9 하네스, 3.10 엔진)에 같은 commit으로 `pip install -e .`한다.
+**정의.** mock 요청 1건이 config → registry → MockSystem → events → hit@k → `$AG_OUT/raw/mock/<run_id>/`(lineage.json 포함) → `plots/fig09.py` → `fig09.pdf` + `numbers.json`(stub)을 60초 안에 통과한다. Python 3.11로 쓴다(D-001). `ag` 패키지는 3.11 venv 하나에 `pip install -e .`로 설치한다.
 
 **순서** (항목마다 PR 하나, 모듈당 100–200줄):
 
@@ -426,23 +437,23 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 
 ### 4.2 단계
 
-표기: **담당** me = 강지의, collab = collaborator. **GPU-h**는 계획서 값 [추정]. **브랜치**는 CLAUDE.md 3.2의 `<주제>/<설명>`.
+표기: **담당**은 모두 강지의다(D-002). 원래 collaborator 몫이던 단계는 "(원래 collab)"으로 표시했다. **GPU-h**는 계획서 값 [추정]. **브랜치**는 CLAUDE.md 3.2의 `<주제>/<설명>`.
 
 #### S0 계약과 자산 — 10/12까지, 담당 both, 2 GPU-h
 
 - **목표**: 코드 전에 `docs/SPEC.md`(플러그인 API, Request·Event 12종과 정렬 키, clock 규칙, Record v1 스키마와 E2.1 대조 입도, 지표 식, results·run_id 규약, YAML·overlay·공정성 knob, 가정 목록)와 `docs/DECISIONS.md`(6절의 결정 항목 + 12.2절 확인 사실)를 연다. gated 모델(Llama-3.1, Prompt Guard 2) 신청은 10/10 즉시. 로그인 노드에서 모델·데이터·baseline 코드·trace를 받는다.
-- **만드는 것**: SPEC·DECISIONS·`docs/metrics.md`·`docs/results.md`; `pyproject.toml`(ag 패키지) + `env/requirements-ag39.txt`; `slurm/ag_common.sh`(`env/ag.env`, offline 강제, AG_PY/AG_PY310, 두 venv의 ag 설치 commit 동일 검사; 기존 `common.sh` 미수정); `ag/data/registry_ag.py` + `slurm/ag_download_login.sh`(`lgs1/download.py` 재사용) → `ag_assets_<MMDD>.json`; CI `.github/workflows/cpu.yml`(3.9·3.10 matrix), `tests/manifests/{cpu,gpu,integration}.txt` + `tools/check_test_classification.py`, `tools/pr_check.sh`, `.gitignore`(results/, *.jsonl, *.npz, env/*.env, figures/*.pdf; 예외 tests/fixtures/**, tests/data/**); `ag/data/traces/mooncake.py` + `scripts/mooncake_stats.py` + `scripts/tool_wait_stats.py` + `tests/data/mooncake_*_50.jsonl.txt`.
-- **첫 작업으로 잴 것**: 기존 LG 테스트 27개 모듈이 CI 조건(3.9, `env/s1.env` 없음)에서 green인지 [측정]. 7개 모듈이 `env/s1.env`·`LG_OUT`·절대 경로를 참조한다 [측정: grep]. 깨지면 CPU gate 명령을 manifest 기반으로 하고 CLAUDE.md 3.4 문구 조정을 결정 항목으로 올린다.
+- **만드는 것**: SPEC·DECISIONS·`docs/metrics.md`·`docs/results.md`; `pyproject.toml`(ag 패키지, `requires-python >= 3.11`) + `env/requirements-ag311.txt`; `slurm/ag_common.sh`(`env/ag.env`, offline 강제, 3.11 venv 활성화; 기존 `common.sh` 미수정); `ag/data/registry_ag.py` + `slurm/ag_download_login.sh`(`lgs1/download.py` 재사용) → `ag_assets_<MMDD>.json`; CI `.github/workflows/cpu.yml`(Python 3.11), `tests/manifests/{cpu,gpu,integration}.txt` + `tools/check_test_classification.py`, `tools/pr_check.sh`, `.gitignore`(results/, *.jsonl, *.npz, env/*.env, figures/*.pdf; 예외 tests/fixtures/**, tests/data/**); `ag/data/traces/mooncake.py` + `scripts/mooncake_stats.py` + `scripts/tool_wait_stats.py` + `tests/data/mooncake_*_50.jsonl.txt`.
+- **첫 작업으로 잴 것**: 기존 LG 테스트 27개 모듈이 CI 조건(3.11, `env/s1.env` 없음)에서 green인지 [측정]. 7개 모듈이 `env/s1.env`·`LG_OUT`·절대 경로를 참조한다 [측정: grep]. 깨지면 CPU gate 명령을 manifest 기반으로 하고 CLAUDE.md 3.4 문구 조정을 결정 항목으로 올린다.
 - **실험**: W0-mooncake(길이 분포·hash_ids 단위·tool 대기 분포 집계).
-- **종료 기준**: 문서 5종 main; cpu.yml green; 비-optional 자산이 HF_HOME에; gated 상태 매일 기록(10/14까지 미승인이면 T2-only/J2-only로 E0.1 시작); Python 결정이 나면 `scripts/py310_bootstrap_login.sh` + `engine_env_check.sbatch`로 무수정 SGLang 0.5.21이 RTX 6000 Ada + Triton backend에서 기동하는지 lineage.json에 [측정].
+- **종료 기준**: 문서 5종 main; cpu.yml green; 비-optional 자산이 HF_HOME에; gated 상태 매일 기록(10/14까지 미승인이면 T2-only/J2-only로 E0.1 시작); `scripts/py311_bootstrap_login.sh`(3.11 venv 생성·SGLang 설치) + `engine_env_check.sbatch`로 무수정 SGLang 0.5.21이 RTX 6000 Ada + Triton backend에서 기동하는지 lineage.json에 [측정].
 - **테스트**: CPU test_trace_loader, test_tool_wait_stats, test_registry_ag, test_no_secrets, test_ag_common_sh, test_check_manifest, test_gitignore_rules, test_pyproject_core_deps.
-- **브랜치**: `spec/plugin-api`, `env/ag-assets`, `env/py310-bootstrap`, `env/engine-env-check`, `env/ci-manifests`, `env/pyproject`, `data/mooncake-stats`, `docs/claude-md-python`.
+- **브랜치**: `spec/plugin-api`, `env/ag-assets`, `env/py311-bootstrap`, `env/engine-env-check`, `env/ci-manifests`, `env/pyproject`, `data/mooncake-stats`, `docs/claude-md-python`.
 
 #### S1 걷는 뼈대 + openai_front 골격 — 10/14까지, 담당 me, 0 GPU-h
 
-4.1절 그대로. **종료 기준**: 두 CPU 명령(`python -m pytest tests -x -q`, `pytest $(cat tests/manifests/cpu.txt)`) green(3.9·3.10); `python -m ag.harness.run --config skeleton.yaml` → `raw/mock/<run_id>/` 8파일; `plots/fig09.py --run-id <mock>` → PDF, `numbers.json` 키 7개 null; test_mock_end_to_end 60초. **브랜치**: `harness/skeleton`, `harness/reference-record`, `harness/openai-front`, `harness/lineage-ag`, `plots/fig09`.
+4.1절 그대로. **종료 기준**: 두 CPU 명령(`python -m pytest tests -x -q`, `pytest $(cat tests/manifests/cpu.txt)`) green(3.11); `python -m ag.harness.run --config skeleton.yaml` → `raw/mock/<run_id>/` 8파일; `plots/fig09.py --run-id <mock>` → PDF, `numbers.json` 키 7개 null; test_mock_end_to_end 60초. **브랜치**: `harness/skeleton`, `harness/reference-record`, `harness/openai-front`, `harness/lineage-ag`, `plots/fig09`.
 
-#### S1E 엔진 spike — G0 10/18까지(b0_engine 10/21, patch v0 10/25), 담당 collab, 4 GPU-h
+#### S1E 엔진 spike — G0 10/18까지(b0_engine 10/21, patch v0 10/25), 담당 me(원래 collab), 4 GPU-h
 
 - **목표**: G1의 최대 위험(CUDA graph 아래 `attn_lse` 읽기 가능 여부, Ada에서 Triton decode 기동, 128토큰 분할 비용 방향)을 **1요청 spike**로 G0 시점에 퇴출한다. 계획서 11.1절은 이 위험의 확인 시점을 G1로 적었지만, 그때 알면 fallback(PyTorch 재계산) 재측정이 11/4까지 밀려 S4·S5가 통째로 늦는다 [해석].
 - **만드는 것**: `engine_integration/sglang/{README.md, spike/dump_lse.py, ag-sglang-0.5.21.patch(v0), patch.sh, check_patch.sh, remove_patch.sh}`; `ag/systems/sglang_client.py`(서버 launch, `/health` 폴링, SSE 파싱) + `b0_engine.py` + `ag/harness/engine_env.py`; openai_front의 sglang backend; `slurm/ag_engine{,_2gpu,_4gpu}.sbatch`.
@@ -452,7 +463,7 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 #### S2 E0 임계 경로 — G0 10/18, 담당 me, 31 GPU-h
 
 - **순서**: ⓪ `ag/reference`의 실제 모델 B0 생성 경로(attention 기록 없음)를 첫 PR로 당겨 초안 데이터 200건(T2 8k) pilot 출력을 10/13까지 만든다(≈2 GPU-h [추정]) → ① 사람 라벨 200(≤10/15), LLM grader는 타깃과 다른 Qwen3-8B [추정], 일치율 ≥ 0.95 [제안값] 10/16 → ② 8k·32k 전량 + calib/test 동결 ≤10/15(payloads·background·manifest는 10/14 중간 마감, S2b E0.3의 입력) → ③ 실제 모델 1요청 테스트: T2 8k와 T1 128k(`logits_to_keep=1` 또는 chunked prefill로 전체 logits 33 GB [계산]를 피하고 피크 메모리·시간 기록 → 요청당 시간과 E0.2 GPU-h 재추정) → ④ E0.1 Slurm array(128k 100건은 ③ 통과 뒤) → ⑤ E0.2(J1·J2 offline).
-- **만드는 것**: `ag/reference/ledger_oracle.py` 실제 모델 경로 + `cache.py`(content-addressed) + `aggregate.py` + 집계 B; `ag/selector/rollout.py`(4.3절 rollout; shim과 같은 함수) + test_rollout_tiny; `ag/data/success_judge.py` + `scripts/grader_validate.py`; `ag/data/lc_inject/{sources, background, payloads, build, gate, manifest}.py`(gate.json: 정답이 과업 해결 · canary로 주입 가시 · 주입 과업 해결 가능 셋 다 통과한 표본만 manifest에); `ag/data/agentdojo_l.py` + openai_front의 reference_b0 backend(3.10 venv에서 AgentDojo trajectory → pair JSON); `ag/judges/{prompt_guard2, agentwatcher_monitor, offline_runner}.py`(verdict cache는 품질 실험에서 요청마다 reset); `ag/sweep/{expand, submit}.py`(`--array`, `%N` 금지, afterok, 자동 `--test-only`) + `slurm/e0_array.sbatch`; `configs/exp/{e0_1, e0_2}.yaml`; `plots/fig09.py` 확장, `fig10.py` 초안, numbers 3·7; `checks.py` G0 + `agctl g0` → `g0_sheet.md`.
+- **만드는 것**: `ag/reference/ledger_oracle.py` 실제 모델 경로 + `cache.py`(content-addressed) + `aggregate.py` + 집계 B; `ag/selector/rollout.py`(4.3절 rollout; shim과 같은 함수) + test_rollout_tiny; `ag/data/success_judge.py` + `scripts/grader_validate.py`; `ag/data/lc_inject/{sources, background, payloads, build, gate, manifest}.py`(gate.json: 정답이 과업 해결 · canary로 주입 가시 · 주입 과업 해결 가능 셋 다 통과한 표본만 manifest에); `ag/data/agentdojo_l.py` + openai_front의 reference_b0 backend(3.11 venv에서 AgentDojo trajectory → pair JSON); `ag/judges/{prompt_guard2, agentwatcher_monitor, offline_runner}.py`(verdict cache는 품질 실험에서 요청마다 reset); `ag/sweep/{expand, submit}.py`(`--array`, `%N` 금지, afterok, 자동 `--test-only`) + `slurm/e0_array.sbatch`; `configs/exp/{e0_1, e0_2}.yaml`; `plots/fig09.py` 확장, `fig10.py` 초안, numbers 3·7; `checks.py` G0 + `agctl g0` → `g0_sheet.md`.
 - **실험**: W0-grader, E0.1, E0.2. **그림**: Fig. 9 초안, Fig. 10 초안, 초록 3(32k)·7 초안.
 - **종료 기준**: 10/13 pilot 200건(lineage); 10/16 agreement ≥ 0.95; 10/15 `raw/data/<sha>/gate.json` + manifest 동결; 1요청 테스트 2건 통과; `raw/E0.1/` T1·T2 × 8k·32k + T1 128k 100 Record v1, hit@k × 집계 × chunk × 위치 [측정]; `raw/E0.2/` J1·J2 FPR·ROC·판정 창 수 [측정]; fig09·fig10; `g0_sheet.md`(E0.1·E0.2·E0.3·E0.4(pending)·AgentDojo-L 포함 여부·T2-only 여부 열) + `docs/G0_decision.md`.
 - **fallback**: AgentDojo-L이 10/15까지 안 되면 4원천으로 G0를 판정하고 10/22 보충. gated 미승인이면 T2-only/J2-only.
@@ -466,7 +477,7 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 - **종료 기준**: 10/18 `raw/E0.3/` AUROC·TPR·ℓ95 [측정]; 10/25 `raw/E0.4/` merged summary [측정]; 요청당 시간 재추정 갱신.
 - **브랜치**: `e0/depth-probe`, `e0/engine-timing`, `plots/fig03-fig05-draft`.
 
-#### S3E 엔진 트랙 — G1 11/1(32k 1점 10/27), 담당 collab, 30 GPU-h
+#### S3E 엔진 트랙 — G1 11/1(32k 1점 10/27), 담당 me(원래 collab), 30 GPU-h
 
 - **목표**: patch v0 위에 `LedgerSink` shim을 올려 Record v1을 같은 writer로 쓰고, S2의 oracle 기록과 `diff.py`로 대조해 G1을 통과한다. E2.3은 분할 128/256/512/1,024마다 LC-Inject 공격 부분집합(8k 500·32k 100·128k 20, E2.1과 동일)을 Record v1 + success_judge 결과와 함께 기록해 E6.1의 분할 축을 재실행 없이 계산한다. TPOT 식은 S1의 `per_request.py`를 쓴다(S3를 기다리지 않음).
 - **만드는 것**: patch v1 + `shim/{patch_manager, ledger(rollout.py 호출; TP>1 all-gather), hooks}.py`; `ag/systems/adapters/sglang_adapter.py` + `ag_ledger_only.py`; `ag/reference/diff.py`(선검사 → teacher-forcing; 토큰별 head 평균과 chunk per-head 둘 다); `ag/bench/tpot_overhead.py`(ledger_export off|sync|async; warm-up 규칙); `configs/targets/t3.yaml` + `tests/gpu/test_tp2_ledger_one_request.py`; `scripts/count_engine_loc.sh`; `configs/exp/{e2_1, e2_2a, e2_2b, e2_3}.yaml`; `plots/fig14.py`.
@@ -474,16 +485,16 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 - **종료 기준**: `raw/E2.1/` diff_report max_abs_err ≤ 1e-3, top8 ≥ 0.99 [측정]; `raw/E2.2/` (a) 100 %, (b) ≥ 99.9 % [측정]; 10/27 32k 1점, `raw/E2.3/` off 32k ≤ +5 % [측정] + 분할 4종 Record; test_tp2_ledger_one_request 통과(불가 시 T3를 TP-2 없이 돌릴지 결정 항목).
 - **테스트**: CPU test_patch_applies(v1), test_ledger_math, test_tp_allgather_math, test_selector_record_vs_live, test_diff_report, test_shim_patch_manager, test_ledger_export_modes, test_fig14_fixture; GPU test_e21_ledger_diff_small, test_e22_token_identity_small, test_b0_no_patch, test_e23_smoke, test_tp2_ledger_one_request.
 - **브랜치**: `engine/ledger-shim`, `engine/adapter-stream`, `engine/tp2-allgather`, `engine/diff-e21-e22`, `engine/e23-overhead`, `plots/fig14`.
-- **위험**: TPOT 초과 → 토큰 n개마다 누산하는 sampling + hit@k 손실 보고; 두 venv의 torch 차이 → `env_hash.{harness,engine}` + commit 검사.
+- **위험**: TPOT 초과 → 토큰 n개마다 누산하는 sampling + hit@k 손실 보고; 엔진 venv의 torch·SGLang 버전 고정 → `env_hash`로 기록.
 
 #### S3 런타임 조립 — G1 11/1(128k 동결 10/28, E1.4 11/5), 담당 me, 16 GPU-h
 
 - **목표**: offline runner를 judge pool로 흡수하고 release gate를 in-process hook으로 만들어 AG 플러그인을 완성한다. AG 플러그인의 플래그 5종 `block_before_generation`(B1a), `release_before_verdict`(B1b), `selector ∈ {topk, all, oracle, random, truncate, last_layer}`, `scheduler ∈ {none, fifo, deadline}`, `judge`의 조합이 B1a/B1b/B1c/B-full/B-oracle/N1/N4/N5/N6 overlay다. W2-e2e-smoke는 **엔진 ledger → selector → judge pool → gate → sink** 경로가 필수다. 엔진 gate hook이 늦으면 하네스 쪽 gate proxy(openai_front의 ag_gate backend)로 대신하되 ledger는 sglang_adapter에서 와야 한다. 엔진 ledger가 11/1까지 합류하지 않으면 G1 미통과로 보고하고 10.2절의 11/4 재측정 규칙을 따른다(기준 완화 없음).
-- **만드는 것**: `ag/runtime/{judge_pool, verdict_cache, release_gate, block_isolate, scheduler(FIFO 골격)}.py`; `engine_integration/sglang/shim/gate_hook.py`(collab); `ag/lg/path.py` + `ag/judges/output_guard.py`; `ag/systems/ag.py` + `configs/systems/{ag, ag_n1..n6, b1a, b1b, b1c, b_full, b_oracle}.yaml` + `adapters/replay_adapter.py`(offline 전용) + `mock_fault_judge.py`; `per_request.py` 확장(release_lag, TPOT_visible, exposed_tokens, judged_windows) + `plots/fig11.py`(mock) + `tests/test_metrics_identity.py`; LC-Inject 128k 전량 동결 ≤10/28(T1 1,007창·T2 1,023창) + `scripts/e01_128k.py`; `ag/data/workloads/wlen_min.py`, `ag/harness/gantt.py` + `plots/fig08.py` 초안; `agctl smoke/g1`.
+- **만드는 것**: `ag/runtime/{judge_pool, verdict_cache, release_gate, block_isolate, scheduler(FIFO 골격)}.py`; `engine_integration/sglang/shim/gate_hook.py`; `ag/lg/path.py` + `ag/judges/output_guard.py`; `ag/systems/ag.py` + `configs/systems/{ag, ag_n1..n6, b1a, b1b, b1c, b_full, b_oracle}.yaml` + `adapters/replay_adapter.py`(offline 전용) + `mock_fault_judge.py`; `per_request.py` 확장(release_lag, TPOT_visible, exposed_tokens, judged_windows) + `plots/fig11.py`(mock) + `tests/test_metrics_identity.py`; LC-Inject 128k 전량 동결 ≤10/28(T1 1,007창·T2 1,023창) + `scripts/e01_128k.py`; `ag/data/workloads/wlen_min.py`, `ag/harness/gantt.py` + `plots/fig08.py` 초안; `agctl smoke/g1`.
 - **실험**: W2-e2e-smoke, E0.1-128k, E1.4. **그림**: Fig. 8 초안, Fig. 9(128k 점), Fig. 11(mock 시계·식별식), 초록 3(128k).
 - **종료 기준**: test_gate_contract_mock(10⁵ chunk, 판정 전 방출 0, P99 ≤ 1 ms 가상 시계; E2.4의 CPU 계약판); 10/28 128k manifest + gate.json; G1: `raw/W2-e2e-smoke/` AgentDojo 1건 + 32k 1건, `producer=sglang-shim`, checks ok [측정]; G1: `raw/E0.1-128k/` T1 128k n=300 hit@8 ≥ 0.85 [제안값] [측정]; 11/5 `raw/E1.4/` gantt + fig08 초안; cpu manifest ≥ 35.
 - **테스트**: CPU test_judge_pool_mock, test_verdict_cache_key, test_release_gate, test_gate_contract_mock, test_block_isolate, test_gantt, test_ag_overlays(플래그별 이벤트 순서), test_replay_adapter, test_lg_path_import, test_wlen_min, test_metrics_identity, test_openai_front_gate_proxy, test_fig08/fig11_fixture; GPU test_e2e_smoke_one, test_agentdojo_one_task, test_lg_path_coexist, test_adapter_equivalence.
-- **브랜치**: `runtime/judge-pool`, `runtime/release-gate`, `runtime/ag-system`, `runtime/lg-link`, `harness/openai-front-gate`, `systems/replay-adapter`, `runtime/e2e-smoke`, `data/lc-inject-128k`, `e0/128k-300`, `engine/gate-hook`(collab), `plots/fig08-fig11`.
+- **브랜치**: `runtime/judge-pool`, `runtime/release-gate`, `runtime/ag-system`, `runtime/lg-link`, `harness/openai-front-gate`, `systems/replay-adapter`, `runtime/e2e-smoke`, `data/lc-inject-128k`, `e0/128k-300`, `engine/gate-hook`, `plots/fig08-fig11`.
 
 #### S3b 동기 그림 보강(부속) — ≤11/8, 담당 me, 69 GPU-h
 
@@ -517,10 +528,10 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 #### S5 성능 임계 경로 — G3 11/22(SLO run 11/15), 담당 me, 208 GPU-h
 
 - **목표**: 첫 job으로 B0 전용 GPU의 P95 TTFT·TPOT(3회, warm-up 제외)를 `configs/slo.yaml`에 적는다(runner와 plots가 같이 읽는 유일한 SLO 원천). E2.3-final은 같은 YAML, `ledger_export`는 E4에서 쓰는 모드, scheduler·gate·judge pool on, 별도 config_hash → `run_id E2.3-final`; off 값은 Fig. 14 하한선만. E4.3은 1-GPU 격자만(2-GPU 행은 S5b 필수, 4-GPU는 S8a). G3에 "얇은 제출본"(Fig. 1, Table 2, Fig. 9·10·11·12·14) 검사를 통과시킨다.
-- **만드는 것**: `scripts/slo_baseline.py` + sbatch → `configs/slo.yaml`; `configs/systems/ag_dedicated.yaml` + `info().placement` + `tests/gpu/test_multi_gpu_placement.py`; `ag/data/workloads/{wlen, wqa, wagent}.py` + `arrivals.py` + `trace_replayer.py` + `warmup.py`; `ag/metrics/goodput.py` + `ag/sweep/capacity.py` + 공정성 knob 검사; `scripts/e23_final.py`(collab); `configs/exp/{e4_1, e4_2, e4_3, e4_7, e2_3_final}.yaml`; `plots/fig11` 최종, `fig12`, `fig01` 최종, `fig08` 최종, `fig14` 최종, numbers 4·5·6·7; `agctl g3`, `scripts/check_thin_submission.py`.
+- **만드는 것**: `scripts/slo_baseline.py` + sbatch → `configs/slo.yaml`; `configs/systems/ag_dedicated.yaml` + `info().placement` + `tests/gpu/test_multi_gpu_placement.py`; `ag/data/workloads/{wlen, wqa, wagent}.py` + `arrivals.py` + `trace_replayer.py` + `warmup.py`; `ag/metrics/goodput.py` + `ag/sweep/capacity.py` + 공정성 knob 검사; `scripts/e23_final.py`; `configs/exp/{e4_1, e4_2, e4_3, e4_7, e2_3_final}.yaml`; `plots/fig11` 최종, `fig12`, `fig01` 최종, `fig08` 최종, `fig14` 최종, numbers 4·5·6·7; `agctl g3`, `scripts/check_thin_submission.py`.
 - **실험**: E4.1, E4.2(3회), E4.3(1-GPU), E4.7. **그림**: Fig. 11·12·1·8·14 최종, 초록 4·5·6·7 최종.
 - **종료 기준**: `configs/slo.yaml` [측정] + source_run_id; `raw/E4.2/` 9 시스템 × 3회; `raw/E4.3/` 1-GPU 격자, fig12, `g3_sheet` + `G3_decision`; `raw/E2.3-final/` E4 모드 TPOT ≤ +2 % [제안값] [측정]; check_thin_submission 통과; cpu manifest ≥ 45.
-- **브랜치**: `perf/slo-baseline`, `perf/dedicated-placement`, `perf/workloads`, `perf/trace-replay`, `perf/goodput-slo`, `perf/e4-sweeps`, `engine/e23-final`(collab), `plots/fig11-fig12-fig01`, `plots/fig08-fig14-final`.
+- **브랜치**: `perf/slo-baseline`, `perf/dedicated-placement`, `perf/workloads`, `perf/trace-replay`, `perf/goodput-slo`, `perf/e4-sweeps`, `engine/e23-final`, `plots/fig11-fig12-fig01`, `plots/fig08-fig14-final`.
 
 #### S5b 성능 보강(부속) — G3 11/22(늦어도 11/25), 담당 me, 160 GPU-h
 
@@ -551,7 +562,7 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 | S8d | E3.6 데이터 주입 대조군(참조 경로) | S6 중 여유 | 15 |
 | S8e | block_isolate regenerate(E2.4 regen 모드) | S4·S5 완료 | 5 |
 | S8f | T4 gpt-oss-20b(E6.3 T4 부분) | S6 LLMail 완료 | E6.3 90 안 |
-| S8g | vLLM 0.31.0 + FlashInfer wrapper, E6.4 [collab] | S8c 완료, FlashInfer·CUDA graph 호환 확인 | 40 |
+| S8g | vLLM 0.31.0 + FlashInfer wrapper, E6.4(1인 수행에서는 하지 않는 것으로 봄) | S8c 완료, FlashInfer·CUDA graph 호환 확인 | 40 |
 
 ### 4.4 할당표
 
@@ -634,26 +645,26 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 
 두 트랙은 아래 접점에서만 만난다. 서명은 `docs/SPEC.md`에 있고, 접점마다 CPU mock 테스트와 GPU 차등 테스트가 짝이다. 하네스 mock이 먼저 green이 되고(S1: 1·2·4·5, S3: 3), 엔진 PR이 GPU로 통과한다.
 
-**2-venv 경계** (Python 결정의 기본안): `ag/` 핵심(selector·rollout, runtime, reference/record, metrics, config)은 3.9 문법·numpy-only 공유 라이브러리로 두 venv에 `pip install -e .`. 프로세스 간은 파일(Record npz, pair JSON, events.jsonl)·HTTP(openai_front, SGLang)만. lineage의 env_hash에 두 venv의 ag 설치 commit 동일 검사. clock: 하네스·엔진·judge pool은 한 Slurm job/한 노드(CLOCK_MONOTONIC 공통)이고 lineage hostname 동일을 검사; 무수정 SGLang(B0)은 서버 타임스탬프가 없어 TTFV는 클라이언트 수신 단일점.
+**환경 경계** (D-001): `ag` 패키지는 엔진과 같은 3.11 venv에 설치되므로 shim이 `ag.selector`를 직접 import한다. 프로세스 간은 파일(Record npz, pair JSON, events.jsonl)·HTTP(openai_front, SGLang)만. AttnTrace만 별도 venv의 worker로 부른다(SPEC 9.2절). clock: 하네스·엔진·judge pool은 한 Slurm job/한 노드(CLOCK_MONOTONIC 공통)이고 lineage hostname 동일을 검사; 무수정 SGLang(B0)은 서버 타임스탬프가 없어 TTFV는 클라이언트 수신 단일점.
 
 1. **Record schema v1** (`ag/reference/record.py`): npz{output_ids, block_mass fp16[T_out × L_trace × n_blocks] head 평균, chunk_head_mass fp16[3 × L_trace × H × n_blocks], block_trusted, layer_ids, head_weighting, lse_total, t_ns} + index.jsonl(producer, first_token_policy, schema_version, events_ref, success_judge_ref). 참조(S2)·shim(S3E)·tpot_overhead(S3E)·16k/64k 기록(S4b)·replay(S3)가 같은 `write_record()`. E2.1 대조: 토큰별 head 평균과 chunk per-head 둘 다 max_abs_err ≤ 1e-3·top8 ≥ 99 %; fp16 언더플로는 log 저장 기준. 테스트: test_record_roundtrip, test_oracle_tiny(CPU); test_e21_ledger_diff_small, test_e22_token_identity_small(GPU).
 2. **LedgerSink / selector·rollout + EngineAdapter** (`shim/ledger.py` → `ag/selector/{select, rollout}.py`): shim은 `LedgerSink.on_decode_step(req_id, layer_id, lse_split[B,H,S], lse_total[B,H], split_tokens=128)`만 호출하고(TP>1은 all-gather 뒤 1회), 수식·rollout·chunk 누산·top-k는 `ag/` 순수 Python(복제본 금지). `ledger_export off|sync|async`는 config_hash 분리. EngineAdapter 구현 셋: mock(S1), replay(S3, offline 전용), sglang(S3E). 테스트: test_ledger_math, test_selector_record_vs_live, test_replay_adapter, test_ledger_export_modes(CPU); test_adapter_equivalence(GPU).
 3. **ReleaseGate hook + openai_front** (`shim/gate_hook.py` → `ag/runtime/release_gate.py`): shim은 `gate.on_tokens/poll`만. 도구 호출 완료 경계 규칙은 S1 골격에서 정하고 S1E가 확인. gate hook이 늦는 기간엔 openai_front의 ag_gate backend가 같은 API로 gate를 대신하되 ledger는 sglang_adapter에서 온다. 테스트: test_gate_contract_mock, test_ag_overlays, test_openai_front_mock, test_metrics_identity(CPU); test_e2e_smoke_one, test_agentdojo_one_task, test_e24_load(GPU).
 4. **System.info() / patch 상태 / 공정성 knob**: `info() → {engine_version, attn_backend, patch_applied, patch_sha, shim_active, model_sha, venv_env_hash, placement, gpu_mem_gib}`; checks.json의 patch_state; 공통 knob는 config_hash에 포함하고 B0·AG 동일 검사. 테스트: test_patch_applies, test_fairness_knobs(CPU); test_b0_no_patch, test_multi_gpu_placement(GPU).
 5. **E2.3 오버헤드 계약** (`ag/bench/tpot_overhead.py` → Fig. 14): TPOT 식은 S1의 `per_request.py`. S3E 초기값 G1 ≤ +5 %(export off, 분할 4종 Record + 공격 부분집합), S5 최종값 G3 ≤ +2 %(E4에서 쓰는 export 모드, scheduler·gate·judge pool on; run_id E2.3-final). 초록 6 = E4 모드 값 + `count_engine_loc.sh`.
-6. **E0.4 합성**: `scripts/e04_merge.py`가 엔진 run_id(collab)와 scan·judge run_id(me)를 `parent_run_ids`·clock offset과 함께 합친다.
+6. **E0.4 합성**: `scripts/e04_merge.py`가 엔진 run_id와 scan·judge run_id를 `parent_run_ids`·clock offset과 함께 합친다.
 
 **엔진이 늦을 때**: 하네스는 참조 기록으로 E3.3·B-oracle·N-variants·E6.1 재합산과 E3.1 1차-A(offline 행)만 먼저 채우고, 전량·지연 열·smoke·E1.4·Fig. 8·11·12·14는 엔진 ledger(G1)를 기다린다. G1 미달이면 10.2절 fallback(11/4 재측정)을 보고하고 기준은 바꾸지 않는다.
 
 ## 5. 브랜치·PR·태그 전략
 
-**규칙(CLAUDE.md 3.2)**: main 직접 push 금지, 작업마다 `<주제>/<짧은-설명>` 브랜치 + PR. main 불변식은 두 CPU 명령 green — `python -m pytest tests -x -q`(`tests/gpu/conftest.py`가 CUDA 없으면 skip; 기존 `tests/conftest.py` 미수정)와 `pytest $(cat tests/manifests/cpu.txt)`. `tools/pr_check.sh`가 두 명령 + `<<<<<<<`·토큰·`/home/` grep. CI `.github/workflows/cpu.yml`은 3.9·3.10 matrix. GPU 차등 테스트는 CI 밖: Slurm 결과(diff_report, run_id, lineage)를 PR 본문에 첨부. 미추적: `results/`, `*.jsonl`, `*.npz`, 체크포인트, `env/*.env`, `figures/*.pdf`(논문 저장소에서만 추적; plots 출력은 `$AG_OUT/figures`); 예외 `tests/fixtures/**`(행 파일은 `.jsonl.txt`), `tests/data/**`. PR당 모듈 1–2개 + CPU 테스트(≤ 500줄). PR 설명에 재현 명령·run_id·수치(출처 표기).
+**규칙(CLAUDE.md 3.2)**: main 직접 push 금지, 작업마다 `<주제>/<짧은-설명>` 브랜치 + PR. main 불변식은 두 CPU 명령 green — `python -m pytest tests -x -q`(`tests/gpu/conftest.py`가 CUDA 없으면 skip; 기존 `tests/conftest.py` 미수정)와 `pytest $(cat tests/manifests/cpu.txt)`. `tools/pr_check.sh`가 두 명령 + `<<<<<<<`·토큰·`/home/` grep. CI `.github/workflows/cpu.yml`은 Python 3.11. GPU 차등 테스트는 CI 밖: Slurm 결과(diff_report, run_id, lineage)를 PR 본문에 첨부. 미추적: `results/`, `*.jsonl`, `*.npz`, 체크포인트, `env/*.env`, `figures/*.pdf`(논문 저장소에서만 추적; plots 출력은 `$AG_OUT/figures`); 예외 `tests/fixtures/**`(행 파일은 `.jsonl.txt`), `tests/data/**`. PR당 모듈 1–2개 + CPU 테스트(≤ 500줄). PR 설명에 재현 명령·run_id·수치(출처 표기).
 
-**단계별 브랜치 접두사**: S0 `spec/`, `env/`, `data/`, `docs/` · S1 `harness/`, `plots/` · S1E·S3E·S8g `engine/`(collab) · S2·S2b `e0/`, `sweep/` · S3 `runtime/`, `systems/`, `data/` · S3b `e1/`, `judges/` · S3c `baseline/` · S4·S4b `runtime/`, `e2/`, `e3/` · S5·S5b `perf/` · S6 `attack/`, `e6/` · S7 `docs/`, `fix/`.
+**단계별 브랜치 접두사**: S0 `spec/`, `env/`, `data/`, `docs/` · S1 `harness/`, `plots/` · S1E·S3E·S8g `engine/` · S2·S2b `e0/`, `sweep/` · S3 `runtime/`, `systems/`, `data/` · S3b `e1/`, `judges/` · S3c `baseline/` · S4·S4b `runtime/`, `e2/`, `e3/` · S5·S5b `perf/` · S6 `attack/`, `e6/` · S7 `docs/`, `fix/`.
 
 **게이트 태그**: `g0-2026-10-18`, `g1-2026-11-01`, `g2-2026-11-15`, `g3-2026-11-22`, `g4-2026-11-29`, `freeze-2026-11-30`, `submit-2026-12-08`. 태그 메시지에 gN_sheet 요약, GN_decision 결론, run_id 목록, DECISIONS 번호. 코드 cutoff 11/29; freeze 뒤 `fix/*`는 `plots/`·`docs/` 렌더링만(`freeze_check`가 `ag/`·`engine_integration/` 변경 거부). 게이트 기준 변경은 DECISIONS 항목이 선행한다(3.6); G1 완화 없음.
 
-**collaborator 엔진 브랜치 통합**: `engine/*`는 patch 1개(`# AG:` hunk) + `shim/`. 허용 경로: `engine_integration/**`, `ag/systems/adapters/{sglang,vllm}_adapter.py`, `b0_engine.py`, `sglang_client.py`, openai_front의 sglang backend, `ag/reference/diff.py`, `ag/bench/`, `configs/targets/t3.yaml`, `plots/fig14.py`, `scripts/count_engine_loc.sh`, `scripts/e23_final.py`. 접점 서명 변경은 SPEC PR 선행·양쪽 리뷰. PR 조건: 두 CPU 명령 green + test_patch_applies; Slurm GPU 차등 테스트 첨부; `count_engine_loc.sh` 출력 [측정]; checks.json의 patch_state. PR 합류 후 `slurm/ag_common.sh`가 두 venv에 `pip install -e .`를 재실행하고 `agctl doctor`가 commit 동일을 검사.
+**엔진 브랜치 통합**: `engine/*`는 patch 1개(`# AG:` hunk) + `shim/`. 허용 경로: `engine_integration/**`, `ag/systems/adapters/{sglang,vllm}_adapter.py`, `b0_engine.py`, `sglang_client.py`, openai_front의 sglang backend, `ag/reference/diff.py`, `ag/bench/`, `configs/targets/t3.yaml`, `plots/fig14.py`, `scripts/count_engine_loc.sh`, `scripts/e23_final.py`. 접점 서명 변경은 SPEC PR 선행. PR 조건: 두 CPU 명령 green + test_patch_applies; Slurm GPU 차등 테스트 첨부; `count_engine_loc.sh` 출력 [측정]; checks.json의 patch_state. PR 합류 후 클러스터의 3.11 venv에서 `pip install -e .`를 다시 하고 `agctl doctor`가 설치된 commit과 HEAD가 같은지 검사한다.
 
 **결과와 commit(lineage)**: 결과는 `$AG_OUT`(`/home/212aig08/ag_results`)의 `raw/<E>/<run_id>/`. CPU 전용 작업은 `LG_CPU_PARTITIONS` 관례 또는 로그인 노드 nohup + `$AG_OUT/logs`. lineage 필드: code_commit(dirty), config_hash, env_hash.{harness, engine}, gpu_name, gpu_count, placement, hostname, slurm_job_id, slurm_array_job_id, slurm_array_task_id, started_at, finished_at, model_sha.{target, guard, judge}, data_manifest_sha, engine_version, patch_sha, producer, clock_offset_ns, parent_run_ids. 모든 JSONL 행에 run_id. `plots/_common.py`는 lineage 불일치 실패, `--require-tag`, `-dirty` 거부. 논문 그림의 run_id·code_commit·config_hash·1차 단계는 `figures/PROVENANCE.md`·`manifest.json`으로 논문 저장소에 태그와 묶는다.
 
@@ -665,7 +676,7 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 
 | 결정 | 기본안(답이 없으면) | 기한 | 걸린 단계 |
 | --- | --- | --- | --- |
-| Python: 하네스 3.9 + 엔진·AgentDojo·AttnTrace용 일회용 3.10 venv(`/home/212aig08/ag_venv/*`) 허용? | 2-venv, 파일/HTTP 경계 | 10/11 | S0, S1E |
+| Python 환경 | **결정(D-001)**: 3.11 venv 하나, AttnTrace만 별도 venv | — | S0, S1E |
 | Record v1 스키마(fp16 head 평균 기본, 전체 head는 calibration 100건만, `schema_version=1`) | 기본안으로 시작, 변경 시 bump | 10/12 | S1, S2, S3E |
 | TTFV의 sink 점: 클라이언트 수신 vs 엔진 gate 직후 | 두 점 모두 기록, 논문은 gate 직후(B0는 클라이언트) | 10/12 | S1, S3 |
 | grader LLM = 타깃과 다른 Qwen3-8B; B0 pilot 200건으로 라벨 | 기본안 | 10/13 | S2 |
@@ -684,14 +695,14 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 | TP-2 ledger(T3) 불가 시: T3를 8k·32k만 TP 없이? | 보고 후 결정 | 10/27 | S3E, S4 |
 | 엔진 변경 LoC 범위: patch 파일만 "엔진 변경", shim은 "AG 런타임" | 기본안 | 11/20 | S7 |
 | Mooncake `arrival_scale`·20분 구간 규칙; 128k는 W-Len만 | 보고 후 결정 | 11/8 | S5 |
-| LG 테스트가 3.9 CI 조건에서 미green이면 CLAUDE.md 3.4 명령 문구 조정 | 측정 후 | 10/12 | S0 |
+| LG 테스트가 3.11 CI 조건에서 미green이면 CLAUDE.md 3.4 명령 문구 조정 | 측정 후 | 10/12 | S0 |
 
 ### 6.2 첫 주(10/10–10/18) 행동 순서
 
 1. 10/10: gated 모델 신청, Python venv 질문, DECISIONS.md 열기, 로그인 노드 다운로드 시작(`registry_ag`).
 2. 10/11–12: SPEC.md(2.2·2.4·4.5절 내용), pyproject·CI·manifest·pr_check, LG 테스트 27모듈 CI 조건 측정, Mooncake·tool 대기 집계. [S0]
 3. 10/12–14: 걷는 뼈대 PR 5개(harness/skeleton → reference-record → openai-front → lineage-ag → plots/fig09). 60초 mock end-to-end green. [S1]
-4. 10/12–: collaborator는 engine_env_check → 1요청 `attn_lse` spike → patch v0. [S1E]
+4. 10/12–16: 3.11 venv 생성과 engine_env_check, 1요청 `attn_lse` spike 스크립트를 S2의 1요청 실측과 같은 날 제출. B0 플러그인·patch v0는 G0 뒤. [S1E, 1인 수행으로 조정]
 5. 10/13: B0 pilot 200건 → 사람 라벨 → 10/16 grader 일치율. 10/14 payloads/background → 10/15 데이터 동결 + gate.json. [S2]
 6. 10/15–17: 1요청 실측(T2 8k, T1 128k) → E0.1 array → E0.2. 10/18 G0 sheet + `docs/G0_decision.md`. [S2]
 7. 병행: E0.3(10/18), E0.4 준비(10/25). [S2b]

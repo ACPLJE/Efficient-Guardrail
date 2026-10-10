@@ -11,6 +11,7 @@
 | 설계도 | `docs/SPEC.md` | 구성 요소 인터페이스, 지표 정의식, 결과 파일 스키마, 시스템 플러그인 API |
 | 결정 기록 | `docs/DECISIONS.md` | 계획서와 다르게 구현해야 할 때 먼저 여기에 적는다(아래 규칙 3.6) |
 | 기존 LG 코드 | `lgs1`–`lgs8`, `s1ctl.py`–`s8ctl.py`, `slurm/`, `tests/` | LG S1–S8 산출물. AG 코드는 이것을 유해 경로로 import하고, 되도록 고치지 않는다 |
+| 구축 계획 | `docs/build-plan-ag-osdi27-2026-10-10.md` | 단계 S0–S7(+선택 S8a–g), 걷는 뼈대, 브랜치·태그 전략. 모든 단계 담당은 강지의(D-002), 코드는 Claude가 쓴다 |
 
 계획서의 번호를 그대로 쓴다. 주장은 C1–C5, 실험은 E0.1–E6.4, 그림은 Fig. 1–16, 표는 Table 1–4, baseline은 B0/B-oracle/B-full/B1a–B6/N1–N6, 타깃은 T1–T4, judge는 J1–J4, workload는 W-QA/W-Agent/W-MT/W-Len, 게이트는 G0–G4, 주는 W0–W7.
 
@@ -46,7 +47,7 @@
 
 ### 3.4 mock 모델로 CPU 통과
 
-- 새 실험 코드(데이터 생성기, 시스템 플러그인, 하네스, 지표, 그림 스크립트)는 **mock 모델로 CPU에서 끝까지** 돌아야 한다. `tests/`에 그 경로의 테스트를 둔다. GPU 없이 `python -m pytest tests -x -q`가 green이어야 PR을 연다.
+- 새 실험 코드(데이터 생성기, 시스템 플러그인, 하네스, 지표, 그림 스크립트)는 **mock 모델로 CPU에서 끝까지** 돌아야 한다. `tests/`에 그 경로의 테스트를 둔다. GPU 없이 `python -m pytest tests -x -q`와 `pytest $(cat tests/manifests/cpu.txt)`가 green이어야 PR을 연다. GPU 테스트는 `tests/gpu/`에 두고 CUDA가 없으면 skip한다.
 - mock은 결정적(deterministic)이어야 하고, 실제 모델과 같은 인터페이스(SPEC의 `Target`, `Guard`, `Judge`)를 구현한다. mock의 attention은 합성 규칙(예: 주입 창에 질량 집중)으로 만들어 hit@k 계산 경로를 검증한다.
 - 규모 확대는 "mock CPU → 실제 모델 1 요청 GPU → 실험 부분집합 → 전량" 순서로만 한다.
 
@@ -74,7 +75,7 @@
 | --- | --- |
 | 스케줄러 | Slurm |
 | GPU | RTX 6000 Ada 48 GB. 파티션 `RTX6000ADA` |
-| Python | 3.9 venv. `source /home3/212aig08/servsec/exp/secu/bin/activate` |
+| Python | **AG 작업은 Python 3.11 venv 하나**(D-001). 제안 경로 `/home/212aig08/ag_venv/ag311`(생성 전). 하네스·SGLang·shim·judge·AgentDojo를 모두 여기에 설치한다. AttnTrace(B3)만 별도 venv(Python 3.10.15·torch 2.5.1 고정)에 두고 파일·subprocess 경계로 부른다(SPEC 9.2·13절). 기존 3.9 venv `source /home3/212aig08/servsec/exp/secu/bin/activate`는 LG 기존 결과 재현용이고 AG 코드에는 쓰지 않는다 |
 | 네트워크 | **계산 노드는 외부 네트워크 없음.** `HF_HUB_OFFLINE=1`, `HF_DATASETS_OFFLINE=1` 필수 |
 | HF 캐시 | `/home/212aig08/.cache/huggingface` (`HF_HOME`). 모델·데이터는 **로그인 노드에서 미리 받는다** (gated 모델은 로그인 노드에서 `HF_TOKEN`) |
 | 큰 데이터·결과 | `/home/212aig08` 쪽에 둔다. `/home3`는 쿼터가 작다 |
