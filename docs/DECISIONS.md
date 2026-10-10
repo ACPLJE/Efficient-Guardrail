@@ -111,12 +111,13 @@
 | D-029 | G0·초록 3의 hit@8 정의 (계획서 10.2는 chunk 3종 중 어느 것인지 미명시) | 서빙 chunk(첫 8토큰, 이후 32토큰)마다 고른 상위 8개의 합집합 기준 hit@8[union], 집계 C. 표준 정의 3종(first8, first32, all)의 hit@8도 함께 보고 | 10/14 | E0.1, G0, Fig. 9, 초록 3 |
 | D-030 | "같은 ASR"에서의 문서 FPR (계획서 C1·E3.4·Fig. 10·초록 1; 운영점 미정의) | 모든 창 방식의 R80 τ에서 나온 calibration ASR에 각 방식의 calibration ASR을 맞추는 운영점(A-match). ASR은 offline gate 재생(SPEC 6.1.2)으로 계산. R80 값도 항상 함께 보고. 대안: R80으로 대신하고 그림 축 이름을 "같은 recall"로 바꿈 | 11/8 | E3.4, Fig. 10, 초록 1 |
 | D-031 | 집계 C의 "위쪽 절반에서 고른 8개 층" (계획서 8.2) | 위쪽 절반 층 U에서 균등 간격 8개 `U[round(i·(|U|−1)/7)]`. 타깃별 층 목록을 `configs/targets/*.yaml`에 고정 | 10/14 | E0.1, G0, 엔진 추적 층 |
-| D-032 | SLO 기준 run의 부하 조건 (계획서 8.1은 "전용 GPU의 P95"만 정함) | B0, 전용 GPU 1장, closed loop 동시 실행 1, 길이 등급별 LC-Inject, 출력 길이 고정, 3회 반복 P95의 중앙값. short 등급은 1k–4k 부분집합 | 11/10 | E4.3, E4.4, Fig. 12·13, 초록 5 |
-| D-033 | TTFT(생성) 증가율의 비교 지점 (B0는 클라이언트 시각, AG는 엔진 시각) | AG 쪽을 엔진 시각 + 같은 요청의 엔진→클라이언트 전달 지연으로 보정해 클라이언트 기준으로 비교. 대안: B0의 서버 쪽 첫 토큰 시각을 얻을 수 있으면 그것을 씀 | 11/10 | C2, E4.2, 초록 4 |
-| D-034 | E4.3의 2·4-GPU 구성 (계획서 6.3은 "타깃 1 + guard 전용 1, 또는 두 장 공존") | n = 2: B0·B1a·B1c·B3는 타깃 replica 2(guard·judge 공존). AG는 "replica 2 공존"과 "타깃 1 + guard·judge 전용 1"을 둘 다 돌려 보고. judge pool과 유해 guard는 replica마다 하나 | 11/15 | E4.3, E4.4, Fig. 12·13 |
+| D-032 | SLO 기준 run의 부하 조건 (계획서 8.1은 "전용 GPU의 P95"만 정함) | B0, 전용 GPU 1장, closed loop 동시 실행 1, 길이 등급별 LC-Inject, 출력 길이 고정, 3회 반복 P95의 중앙값. short 등급은 1k–4k 부분집합. tool sink 요청은 별도 등급으로, 같은 run에서 잰 출력 전체 수신 시각의 P95를 기준으로 함 | 11/10 | E4.3, E4.4, Fig. 12·13, 초록 5 |
+| D-033 | TTFT(생성) 증가율의 비교 지점 (B0는 클라이언트 시각, AG는 엔진 시각) | AG 쪽을 엔진 시각 + 같은 요청의 엔진→클라이언트 전달 지연으로 보정해 클라이언트 기준으로 비교. 대안: B0의 서버 쪽 첫 토큰 시각을 얻을 수 있으면 그것을 씀. TPOT(생성) 비교(E2.3, E4.6)는 양쪽 모두 클라이언트 수신 시각을 기본으로 함 | 11/10 | C2, E4.2, 초록 4 |
+| D-034 | E4.3의 2·4-GPU 구성 (계획서 6.3은 "타깃 1 + guard 전용 1, 또는 두 장 공존") | n = 2: B0·B1a·B1c·B3는 타깃 replica 2(guard·judge 공존). AG는 "replica 2 공존"과 "타깃 1 + guard·judge 전용 1"을 둘 다 돌려 보고. judge pool과 유해 guard는 replica마다 하나. n = 4: B0 계열은 replica 4, AG는 "replica 4 공존"과 "replica 2 + 전용 2" | 11/15 | E4.3, E4.4, Fig. 12·13 |
 | D-035 | trace workload의 요청 본문 (계획서 5.5 "길이가 맞는 것을 뽑아") | trace의 input_length ±10 % 안으로 LC-Inject 생성기가 만든 요청. 실제/trace 토큰 비를 summary에 기록. "8k 이상 부분 trace"는 min_input_tokens = 8,192 | 11/8 | E4.2–E4.5 |
 | D-036 | 운영점 임계값의 calibration 단위와 live 기본 운영점 | τ는 (target, judge, length_class)마다 원천을 합친 calibration에서 정함. live 품질 run의 기본 운영점은 F5(문서 FPR 5 %) | 10/16 | E0.2, E3.1, E3.4 |
 | D-037 | T4(gpt-oss-20b, 선택)의 추적 층 | 전체 문맥을 보는 12개 층에서만 upper_half·tracked8을 고르고, sliding 층은 제외. Record에 attention sink 질량을 따로 기록 | T4 실험 전 | E6.3 |
+| D-038 | `lgs1/lineage.py` 재사용 범위 (CLAUDE.md 3.3 "가능하면 그 모듈을 확장") | `canonical_hash`, `dir_fingerprint`, `code_commit`, `iter_rows`만 재사용. `RowsWriter`와 `assert_resume_compatible`은 LG의 6-키 Lineage를 전제하므로 쓰지 않고 `ag/harness/{lineage,writer}.py`에 AG 필드 전체를 비교하는 구현을 둔다 | 10/12 | 모든 run의 lineage·resume |
 
 ---
 
@@ -137,7 +138,7 @@
 | 번호 | 사실 | 출처 | 상태 |
 | --- | --- | --- | --- |
 | F-01 | 로그인 노드에 Python 3.11 인터프리터가 있는가(없으면 conda 또는 uv로 받음) | D-001 | 열림 |
-| F-02 | `/home/212aig08`에 venv 2개(3.11 주 venv, AttnTrace용 3.10)를 둘 공간이 있는가. venv 하나 약 10 GB \[추정\] | D-001 | 열림 |
+| F-02 | `/home/212aig08`에 venv 2개(3.11 주 venv, AttnTrace용 3.10)를 둘 공간이 있는가. venv 하나 약 10 GB \[추정\]. Record 저장: 타깃당 약 59–66 GB(8k·32k, layers = all, calibration 포함) + T1 128k 300건 약 8 GB \[계산, SPEC 5.2\] | D-001 | 열림 |
 | F-03 | SGLang 0.5.21의 `requires-python`과 torch 버전, Python 3.11 wheel 설치 가능 여부 | D-001, 계획서 6.4 | 열림 |
 | F-04 | 무수정 SGLang Triton decode backend가 RTX 6000 Ada(SM89)에서 기동되는가 | 계획서 4.2 | 열림 |
 | F-05 | SGLang Triton decode의 `attn_lse`를 CUDA graph를 켠 상태에서 step마다 읽을 수 있는가 | 계획서 12.2 | 열림 |

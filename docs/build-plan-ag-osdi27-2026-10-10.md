@@ -195,7 +195,7 @@ docs/                        # SPEC.md, DECISIONS.md, metrics.md, AE.md
 
 **`plots/`**: `_common.py`(run 로더, `--run-id latest`, group-by/filter/error bar, 누락 (system, workload) 셀을 **실패로** 보고), `fig01.py`…`fig16.py`, `table2.py`…`table4.py`, `numbers.py` → `numbers.json`(9.3절 7개). 모두 `results/`만 읽는다.
 
-**`tests/`**: `manifests/{cpu,gpu,integration}.txt` + `tools/check_test_classification.py`; `test_metrics_identity.py`(scripted clock: `e2e_visible − TTFV == Σ ITL_visible`, `TTFV == TTFT_gen + release_lag[0]`), `test_mock_end_to_end.py`(데이터 → mock system → events → JSONL → `plots/fig11.py`), `test_lineage_mismatch.py`, `test_patch_applies.py`(dry-run), `test_trace_loader.py`, `test_plots_on_fixture.py`(16개 전부 mock fixture로).
+**`tests/`**: `manifests/{cpu,gpu,integration}.txt` + `tools/check_test_classification.py`; `test_metrics_identity.py`(scripted clock: SPEC 6.2 식별식 1–3, `TTFV == TTFT_gen + (g0 − f) + (l0 − g0) + (d0 − l0)`(SPEC 6.2 식별식 1)), `test_mock_end_to_end.py`(데이터 → mock system → events → JSONL → `plots/fig11.py`), `test_lineage_mismatch.py`, `test_patch_applies.py`(dry-run), `test_trace_loader.py`, `test_plots_on_fixture.py`(16개 전부 mock fixture로).
 
 **`results/` 규약**: `results/raw/<E>/<run_id>/{lineage.json, resolved.json, events.jsonl, summary.json, checks.json, server.log, cmd.txt}`, `results/raw/<E>/latest.txt`, `results/processed/figNN/<run_id>/*.csv`, `figures/figNN.pdf`. `run_id` = `<E>-<system>-<workload>-<config_hash[:8]>-<seed>-<ts>`.
 

@@ -23,7 +23,7 @@
 4. **시스템과 하네스를 분리한다.** B0부터 AG까지 모든 시스템이 같은 인터페이스 `system.run(request) → events`로 하네스에 꽂힌다. baseline 추가는 플러그인 하나 추가다. 측정은 전부 하네스가 한다.
 5. **설정은 파일, 실행은 기록.** 실험 조건은 YAML. 실행마다 commit hash, config hash, env, GPU 종류를 결과 디렉터리에 같이 쓴다(lineage). 조건이 다른 결과는 섞이지 않는다.
 6. **baseline은 원 수치를 먼저 재현한다.** 우리 설정에 쓰기 전에 원 논문 설정에서 원 수치가 나오는지 확인한다(Table 4 이식 검증표. 품질 ±3 pp, 지연 ±20 %).
-7. **그림 하나 = 스크립트 하나, 논문 숫자는 자동 생성.** `plots/figNN.py`는 `results/`만 읽어 그림을 만든다. 초록의 수치 7개(계획서 9.3절)는 `numbers.json`에서 나온다. 재실행하면 전부 갱신된다.
+7. **그림 하나 = 스크립트 하나, 논문 숫자는 자동 생성.** `plots/figNN.py`는 결과 디렉터리(`$AG_OUT/raw`, `$AG_OUT/processed`; SPEC 7.1)만 읽어 그림을 만든다. 초록의 수치 7개(계획서 9.3절)는 `numbers.json`에서 나온다. 재실행하면 전부 갱신된다.
 8. **작게 끝까지, 그다음 크게.** mock 모델로 CPU에서 요청 하나가 데이터 → 시스템 → 측정 → 결과 파일 → 그림까지 통과한 뒤 규모를 키운다.
 
 ## 3. 규칙
@@ -42,13 +42,13 @@
 ### 3.3 lineage
 
 - 모든 실행은 결과 디렉터리에 `lineage.json`을 남긴다. 최소 필드: `code_commit`(dirty 표시 포함), `config_hash`(YAML의 정규화 해시), `env_hash`(`pip freeze` + 주요 환경 변수), `gpu_name`, `gpu_count`, `hostname`, `slurm_job_id`, `started_at`, `finished_at`, `model_sha`(타깃·guard·judge 각각), `data_manifest_sha`.
-- 결과 행(JSONL)마다 `run_id`를 붙인다. `run_id`로 `lineage.json`을 찾을 수 있어야 한다. 기존 `lgs1/lineage.py`의 방식을 따르고, 가능하면 그 모듈을 확장해서 쓴다.
+- 결과 행(JSONL)마다 `run_id`를 붙인다. `run_id`로 `lineage.json`을 찾을 수 있어야 한다. `lgs1/lineage.py`에서는 `canonical_hash`, `dir_fingerprint`, `code_commit`, `iter_rows`만 재사용하고, 비교·쓰기는 AG 필드 전체를 다루는 `ag/harness/{lineage,writer}.py`로 한다(D-038, SPEC 7.2).
 - 같은 `run_id`에 다른 lineage로 이어 쓰기(resume) 금지. 불일치는 오류로 끝낸다.
 
 ### 3.4 mock 모델로 CPU 통과
 
 - 새 실험 코드(데이터 생성기, 시스템 플러그인, 하네스, 지표, 그림 스크립트)는 **mock 모델로 CPU에서 끝까지** 돌아야 한다. `tests/`에 그 경로의 테스트를 둔다. GPU 없이 `python -m pytest tests -x -q`와 `pytest $(cat tests/manifests/cpu.txt)`가 green이어야 PR을 연다. GPU 테스트는 `tests/gpu/`에 두고 CUDA가 없으면 skip한다.
-- mock은 결정적(deterministic)이어야 하고, 실제 모델과 같은 인터페이스(SPEC의 `Target`, `Guard`, `Judge`)를 구현한다. mock의 attention은 합성 규칙(예: 주입 창에 질량 집중)으로 만들어 hit@k 계산 경로를 검증한다.
+- mock은 결정적(deterministic)이어야 하고, 실제 모델과 같은 인터페이스(SPEC의 `Target`, `HarmGuard`, `Judge`, `EngineAdapter`)를 구현한다. mock의 attention은 합성 규칙(예: 주입 창에 질량 집중)으로 만들어 hit@k 계산 경로를 검증한다.
 - 규모 확대는 "mock CPU → 실제 모델 1 요청 GPU → 실험 부분집합 → 전량" 순서로만 한다.
 
 ### 3.5 수치 표기
@@ -84,7 +84,7 @@
 | 상태 조회 | `sacct` **없음**. `squeue -u 212aig08`, `scontrol show job <id>`, `sbatch --test-only`, `sinfo` 사용. 완료 job의 기록은 우리가 남기는 `lineage.json`과 Slurm 로그로 대신한다 |
 | 공통 스크립트 | `slurm/common.sh`가 env 파일을 읽고 offline 모드·python을 정한다. 새 sbatch는 이것을 source한다 |
 
-sbatch 템플릿의 최소 헤더:
+sbatch 템플릿의 최소 헤더(AG job은 S0에서 만드는 `slurm/ag_common.sh`를 source한다. 이 스크립트가 `env/ag.env`를 읽고 3.11 venv를 활성화하며 offline 모드를 강제한다. 기존 `slurm/common.sh`는 LG용이다):
 
 ```bash
 #!/bin/bash
@@ -94,7 +94,7 @@ sbatch 템플릿의 최소 헤더:
 #SBATCH -c 8
 #SBATCH -t 24:00:00
 #SBATCH -o %x.%j.out
-source "$(dirname "$0")/../slurm/common.sh"
+source "$(dirname "$0")/../slurm/ag_common.sh"
 ```
 
 ## 5. 작업 시작 체크리스트
