@@ -36,12 +36,31 @@ def read_json(path: str | Path) -> Any:
         return json.load(f)
 
 
+def drop_partial_tail(path: Path) -> int:
+    """Cut a partial last line (and a trailing NUL block) left by a crash mid-write, so appended rows
+    start on a fresh line. iter_rows already ignores such a tail; the request it belonged to is
+    re-run on resume. Returns the number of bytes removed."""
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    with open(path, "r+b") as f:
+        data = f.read()
+        keep = data.rstrip(b"\x00")
+        cut = len(keep) if keep.endswith(b"\n") else keep.rfind(b"\n") + 1
+        if cut != len(data):
+            f.truncate(cut)
+        return len(data) - cut
+
+
 class JsonlWriter:
     """Append-only JSONL with one lock; every line is flushed."""
 
-    def __init__(self, path: str | Path, run_id: str):
+    def __init__(self, path: str | Path, run_id: str, *, repair_tail: bool = True):
+        """repair_tail: drop a crash-left partial last line first. Only for files that one run owns;
+        shared files (raw/index.jsonl) that other jobs may be appending to pass False."""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if repair_tail:
+            drop_partial_tail(self.path)
         self.run_id = run_id
         self._lock = threading.Lock()
         self._f = open(self.path, "a", encoding="utf-8")

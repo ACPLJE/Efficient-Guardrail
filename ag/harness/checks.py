@@ -9,6 +9,7 @@ from ag.data.serde import JsonMixin
 from ag.harness.events import Event, EventType as E, JobKind, by_request
 
 CLIENT_WAIT_BOUND_NS = 1_000_000
+DEADLINE_SLACK_NS = 1_000_000      # gate poll granularity allowed after a deadline before the fail-closed block
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,15 @@ def _check_request(rid: str, evs: list[Event], flags: Mapping[str, Any]) -> dict
         if g.cached_verdict_ns is not None and g.cached_verdict_ns > r.t_ns:
             fail("no_release_before_verdict", f"chunk {j} released before its cached verdict time")
 
+    # one gate decision per chunk (released xor blocked, at most once)
+    decisions: dict[int, int] = {}
+    for e in evs:
+        if e.type in (E.CHUNK_RELEASED, E.CHUNK_BLOCKED):
+            decisions[e.chunk_id] = decisions.get(e.chunk_id, 0) + 1
+    for j, n in decisions.items():
+        if n > 1:
+            fail("invariants.one_decision_per_chunk", f"chunk {j} has {n} release/block decisions")
+
     # 3. in-order release; 4. nothing released after a block
     rel_ids = sorted(rel)
     for a, b in zip(rel_ids, rel_ids[1:]):
@@ -84,13 +94,26 @@ def _check_request(rid: str, evs: list[Event], flags: Mapping[str, Any]) -> dict
         elif any(d.t_ns > rel[0].t_ns for d in scans):
             fail("invariants.harm_scan_before_release", "chunk 0 released before HARM_SCAN finished")
 
-    # 6. fail-closed deadlines: a released chunk's gating jobs finished by their deadline
+    # 6. fail-closed deadlines: a gating job without a verdict by its deadline -> the chunk is
+    # CHUNK_BLOCKED(reason="deadline_miss") at the deadline; it is never released
     if not rbv:
-        for j, r in rel.items():
-            for jid in gen[j].required_jobs if j in gen else ():
+        stop = min(blk) if blk else None
+        for j, g in gen.items():
+            if stop is not None and j > stop:
+                continue
+            late = []
+            for jid in g.required_jobs:
                 s, d = submitted.get(jid), done.get(jid)
-                if s is not None and d is not None and s.deadline_ns is not None and d.t_ns > s.deadline_ns:
-                    fail("invariants.deadline_fail_closed", f"chunk {j} released on {jid} after its deadline")
+                if s is not None and s.deadline_ns is not None and (d is None or d.t_ns > s.deadline_ns):
+                    late.append((jid, s.deadline_ns))
+            if not late:
+                continue
+            dl = min(t for _, t in late)
+            if j in rel:
+                fail("invariants.deadline_fail_closed", f"chunk {j} released on {late[0][0]} after its deadline")
+            elif j in blk and (blk[j].reason != "deadline_miss" or blk[j].t_ns > dl + DEADLINE_SLACK_NS):
+                fail("invariants.deadline_fail_closed",
+                     f"chunk {j} missed its deadline but was blocked with reason={blk[j].reason!r} at {blk[j].t_ns}")
 
     # 7. exactly one terminal event; 8. FINISHED after all JOB_DONE
     fin = [e for e in evs if e.type == E.FINISHED]
@@ -125,7 +148,7 @@ def _check_request(rid: str, evs: list[Event], flags: Mapping[str, Any]) -> dict
 
 CHECK_NAMES = (
     "invariants.lifecycle_order", "invariants.release_after_generated", "no_release_before_verdict",
-    "invariants.in_order_release", "invariants.no_release_after_block", "invariants.harm_scan_before_release",
+    "invariants.one_decision_per_chunk", "invariants.in_order_release", "invariants.no_release_after_block", "invariants.harm_scan_before_release",
     "invariants.deadline_fail_closed", "invariants.one_terminal", "invariants.finished_after_jobs",
     "chunk_without_verdict", "held_chunks_at_end", "invariants.delivered_after_released", "client_wait_bounded",
 )

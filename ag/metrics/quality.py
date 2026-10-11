@@ -38,13 +38,21 @@ def bootstrap_ci(units: Sequence[Any], stat: Callable[[Sequence[Any]], float | N
     return float(lo), float(hi)
 
 
+def _stratum(r: Mapping) -> str:
+    """Bootstrap stratum = data source (SPEC 6.1.3); request ids start with <source>/ (SPEC 1.5)."""
+    if r.get("source"):
+        return str(r["source"])
+    rid = r.get("request_id") or r.get("unit_id") or ""
+    return str(rid).split("/", 1)[0] or "all"
+
+
 def _with_ci(rows: Sequence[Mapping], pred: Callable[[Mapping], bool], keep: Callable[[Mapping], bool],
              *, seed: int = 0) -> dict[str, Any]:
     sel = [r for r in rows if keep(r) and r.get("error_kind") is None]
     num = sum(1 for r in sel if pred(r))
     out = rate(num, len(sel))
     lo, hi = bootstrap_ci(sel, lambda xs: sum(1 for r in xs if pred(r)) / len(xs) if xs else None,
-                          strata=[r.get("source", "all") for r in sel], seed=seed)
+                          strata=[_stratum(r) for r in sel], seed=seed)
     out.update(ci_low=lo, ci_high=hi, unit="ratio")
     return out
 

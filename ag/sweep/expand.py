@@ -94,6 +94,7 @@ def expand(exp: Mapping[str, Any], *, systems_dir: str | Path | None = None, ts:
         r.pop("systems", None)
         r.pop("targets", None)
         r.pop("seeds", None)
+        r.pop("repeats", None)          # the count; the job keeps its own repeat index (SPEC 8.1)
         r.update(system_id=sysd["system_id"], system=sysd, target=target, seed=seed, repeat=rep, shard=shard,
                  n_shards=n_shards, clock=clock or exp.get("clock", "monotonic"))
         chash = config_hash(r)

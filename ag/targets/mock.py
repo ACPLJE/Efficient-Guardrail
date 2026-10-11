@@ -61,6 +61,12 @@ class MockTokenizer:
         return " ".join(self._rev.get(int(i), f"<{int(i)}>") for i in ids)
 
 
+def mock_target_layers(cfg) -> tuple[int, tuple[str, ...]]:
+    """(n_layers, layer_attn_kind) of a mock target from its system-file config (flags.mock.target)."""
+    n = 4 if cfg.get("kind", "synthetic") == "tiny" else int(cfg.get("n_layers", 8))
+    return n, tuple(["full"] * n)
+
+
 class MockTarget(Target):
     """Deterministic mock target. See module docstring."""
 
@@ -118,12 +124,19 @@ class MockTarget(Target):
     def generate(self, rp: RenderedPrompt, max_new_tokens: int, *, record: RecordSpec | None,
                  forced_output: Sequence[int] | None = None,
                  drop_tokens: Sequence[tuple[int, int]] = ()) -> TargetOutput:
+        if record is not None and record.split_tokens != rp.split_tokens:
+            raise ValueError(f"RecordSpec.split_tokens={record.split_tokens} != rendered split {rp.split_tokens}")
         if self.kind == "tiny":
             return self._generate_tiny(rp, max_new_tokens, record, forced_output)
-        words = self.output_words(rp, max_new_tokens)
-        ids = tuple(self.tokenizer.token_id(w) for w in words) if forced_output is None else tuple(forced_output)
+        if forced_output is None:
+            words = self.output_words(rp, max_new_tokens)
+            ids = tuple(self.tokenizer.token_id(w) for w in words)
+            text = " ".join(words)
+        else:                    # teacher forcing: the text is the forced ids
+            ids = tuple(int(i) for i in forced_output)
+            text = self.tokenizer.decode(ids)
         rec = self._synthetic_record(rp, ids, record) if record is not None else None
-        return TargetOutput(ids, " ".join(words), (), 0, tuple(0 for _ in ids), 0, rec)
+        return TargetOutput(ids, text, (), 0, tuple(0 for _ in ids), 0, rec)
 
     def _synthetic_record(self, rp: RenderedPrompt, ids: Sequence[int], spec: RecordSpec) -> LedgerRecord:
         T, NB = len(ids), rp.n_blocks
@@ -135,7 +148,7 @@ class MockTarget(Target):
             blocks = sorted({b for w in rp.payload_windows for b in (w, min(w + 1, NB - 1))})
         elif len(untr):
             w = int(rng.choice(untr))
-            blocks = [w, min(w + 1, NB - 1)]
+            blocks = sorted({w, min(w + 1, NB - 1)})       # w = NB-1 would otherwise count twice
         else:
             blocks = [NB - 1]
         focus = np.zeros(NB)

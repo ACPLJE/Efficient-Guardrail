@@ -46,10 +46,25 @@ def test_sbatch_test_only_then_submit(tmp_path, fake_sbatch):
     assert len(calls) == 2 and all(c.startswith("--test-only ") for c in calls)    # wave 0 (B0), wave 1 (AG)
     scripts = sorted((out / "raw" / "mock" / "jobs").glob("*.sbatch"))
     assert len(scripts) == 2 and "--array" not in scripts[0].read_text()
+    assert (out / "logs").is_dir()                                   # Slurm needs the -o directory to exist
+    assert f'export AG_OUT="{out.resolve()}"' in scripts[0].read_text()
     fake_sbatch.write_text("")
     assert agctl.main(["run", "--config", cfg, "--out", str(out), "--sbatch", "--submit"]) == 0
     calls = fake_sbatch.read_text().splitlines()
     assert [c.split()[0] for c in calls] == ["--test-only", "--test-only", calls[2].split()[0], "--dependency=afterok:4242"]
+
+
+def test_clock_passed_to_array_tasks(tmp_path, fake_sbatch):
+    import re
+    from ag.harness.run import main as run_main
+    out = tmp_path / "out"
+    cfg = str(ROOT / "configs" / "exp" / "skeleton.yaml")
+    assert agctl.main(["run", "--config", cfg, "--out", str(out), "--sbatch", "--clock", "monotonic"]) == 0
+    script = sorted((out / "raw" / "mock" / "jobs").glob("*.sbatch"))[0].read_text()
+    assert "--clock monotonic" in script
+    ts = re.search(r"--ts (\S+)", script).group(1)
+    # an array task that re-expands with a different clock would make other run_ids: refused
+    assert run_main(["--config", cfg, "--out", str(out), "--ts", ts, "--clock", "virtual", "--job-index", "0"]) == 2
 
 
 def test_doctor_runs():

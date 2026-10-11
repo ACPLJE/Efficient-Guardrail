@@ -16,6 +16,11 @@
   },
   {
     "detail": "",
+    "name": "invariants.one_decision_per_chunk",
+    "ok": true
+  },
+  {
+    "detail": "",
     "name": "invariants.in_order_release",
     "ok": true
   },
@@ -72,6 +77,11 @@
   {
     "detail": "",
     "name": "no_traceback_in_logs",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "all_requests_have_outcomes",
     "ok": true
   }
 ]

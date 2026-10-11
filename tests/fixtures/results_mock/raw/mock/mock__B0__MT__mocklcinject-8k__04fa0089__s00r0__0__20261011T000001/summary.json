@@ -4,8 +4,8 @@
     "default_variant_id": "11a747dc",
     "n_S": 3,
     "n_units": 8,
-    "run_id": "mock__B0__MT__mocklcinject-8k__0fe5e5ff__s00r0__0__20261011T000000",
-    "s_source_run_id": "mock__B0__MT__mocklcinject-8k__0fe5e5ff__s00r0__0__20261011T000000",
+    "run_id": "mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001",
+    "s_source_run_id": "mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001",
     "system_info": {
       "attn_backend": null,
       "engine": "mock",
@@ -133,24 +133,28 @@
     "value": 1443840000.0
   },
   "exposed_tokens_p50": {
-    "n": 8,
+    "n": 0,
+    "not_applicable": true,
     "unit": "tokens",
-    "value": 0.0
+    "value": null
   },
   "exposed_tokens_p90": {
-    "n": 8,
+    "n": 0,
+    "not_applicable": true,
     "unit": "tokens",
-    "value": 0.0
+    "value": null
   },
   "exposed_tokens_p95": {
-    "n": 8,
+    "n": 0,
+    "not_applicable": true,
     "unit": "tokens",
-    "value": 0.0
+    "value": null
   },
   "exposed_tokens_p99": {
-    "n": 8,
+    "n": 0,
+    "not_applicable": true,
     "unit": "tokens",
-    "value": 0.0
+    "value": null
   },
   "fpr_all": {
     "ci_high": 0.0,

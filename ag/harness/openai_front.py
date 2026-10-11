@@ -92,10 +92,17 @@ class OpenAIFront:
             return next(self._idx)
 
     def stream(self, body: Mapping[str, Any], headers: Mapping[str, str] | None = None) -> Iterator[dict]:
-        """Yield OpenAI chat.completion.chunk dicts; the last one has finish_reason set."""
+        """Validate the request now (ValueError before anything is sent) and return a generator of
+        OpenAI chat.completion.chunk dicts; the last one has finish_reason set."""
         headers = {k.lower(): v for k, v in (headers or {}).items()}
-        req = messages_to_request(body, idx=self._next_idx(), episode=headers.get("x-ag-episode"),
-                                  turn=int(headers.get("x-ag-turn", 0)))
+        try:
+            turn = int(headers.get("x-ag-turn", 0))
+        except ValueError as exc:
+            raise ValueError(f"bad X-AG-Turn header: {exc}") from exc
+        req = messages_to_request(body, idx=self._next_idx(), episode=headers.get("x-ag-episode"), turn=turn)
+        return self._chunks(req)
+
+    def _chunks(self, req: Request) -> Iterator[dict]:
         cid = f"chatcmpl-{zlib.crc32(req.request_id.encode()):010d}"
         created = int(time.time())
         base = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": self.model,
@@ -161,16 +168,22 @@ def make_server(front: OpenAIFront, host: str = "127.0.0.1", port: int = 0) -> T
                 headers = dict(self.headers.items())
                 if not body.get("stream"):
                     return self._json(200, front.complete(body, headers))
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                for ch in front.stream(body, headers):
+                chunks = front.stream(body, headers)       # validates; a ValueError still becomes a 400
+            except ValueError as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            try:
+                for ch in chunks:
                     self.wfile.write(f"data: {json.dumps(ch)}\n\n".encode())
                     self.wfile.flush()
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
-            except ValueError as exc:
-                self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except ValueError as exc:   # headers are out: report in-band, never a second HTTP response
+                err = {"error": {"message": str(exc), "type": "invalid_request_error"}}
+                self.wfile.write(f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode())
+                self.wfile.flush()
 
     return ThreadingHTTPServer((host, port), Handler)

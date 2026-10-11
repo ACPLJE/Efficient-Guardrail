@@ -24,7 +24,8 @@ from ag.data.types import Generation, Request
 from ag.harness.checks import all_ok, run_checks
 from ag.harness.collector import Collector
 from ag.harness.context import RunContext, make_clock
-from ag.harness.events import Event, EventType as E, event_from_row
+from ag.harness.checks import Check
+from ag.harness.events import Event, EventType as E, JobKind, event_from_row
 from ag.harness.lineage import build_lineage, close_lineage, open_lineage
 from ag.harness.writer import JsonlWriter, atomic_write_json, atomic_write_text, read_rows
 from ag.metrics.score import score_outcomes
@@ -53,18 +54,30 @@ def _shard(reqs: Sequence[Request], shard: int, n: int) -> list[Request]:
     return [r for i, r in enumerate(reqs) if i % n == shard]
 
 
+# job kind -> the block reason of that stage (SPEC 2.4 block_reasons; R_inj in SPEC 6.1)
+JOB_REASON = {JobKind.INJ_JUDGE: "inj_window", JobKind.PROBE: "probe", JobKind.SANITIZE: "sanitize",
+              JobKind.ATTRIBUTION: "attribution", JobKind.HARM_SCAN: "harm_input",
+              JobKind.HARM_DEEP: "harm_input", JobKind.OUTPUT_GUARD: "output_guard"}
+
+
 def outcome_run_row(req: Request, evs: Sequence[Event]) -> dict[str, Any]:
     fin = next((e for e in evs if e.type == E.FINISHED), None)
     err = next((e for e in evs if e.type == E.ERROR and e.fatal), None)
     gen: Generation | None = fin.generation if fin else None
+    # block_reasons = every stage that judged unsafe, blocked or not (e.g. a late verdict under
+    # release_before_verdict); block_reason stays the one that actually stopped the request
     reasons = [e.reason for e in evs if e.type in (E.CHUNK_BLOCKED, E.REQUEST_BLOCKED) and e.reason]
     judged: set[int] = set()
     uncached: set[int] = set()
+    specs: set[str] = set()
     calls = 0
     selected: dict[int, list[int]] = {}
     for e in evs:
         if e.type == E.JOB_DONE:
+            if e.job_kind in JOB_REASON and (any(v.unsafe for v in e.verdicts) or (e.result or {}).get("unsafe")):
+                reasons.append(JOB_REASON[e.job_kind])
             for v in e.verdicts:
+                specs.add(v.window_spec)
                 if v.window_id is not None:
                     judged.add(v.window_id)
                     uncached.add(v.window_id)
@@ -73,8 +86,10 @@ def outcome_run_row(req: Request, evs: Sequence[Event]) -> dict[str, Any]:
             judged.update(e.payload.get("cached_windows", ()))
             if "selected" in e.payload:
                 selected[e.chunk_id] = list(e.payload["selected"])
-        elif e.type == E.REQUEST_BLOCKED and "selected" in e.payload:
-            selected[-1] = list(e.payload["selected"])
+        elif e.type == E.REQUEST_BLOCKED:
+            judged.update(e.payload.get("cached_windows", ()))
+            if "selected" in e.payload:
+                selected[-1] = list(e.payload["selected"])
     prompt = dict(fin.payload.get("prompt", {})) if fin else {}
     return {
         "request_id": req.request_id, "variant_id": "live", "is_attack": req.is_attack,
@@ -82,7 +97,7 @@ def outcome_run_row(req: Request, evs: Sequence[Event]) -> dict[str, Any]:
         "block_reasons": sorted(set(reasons)),
         "error_kind": (err.reason or "error").split(":")[0] if err else None,
         "judged_windows": len(judged), "judged_windows_uncached": len(uncached), "judge_calls": calls,
-        "judged_windows_spec": "128x2", "selected": selected,
+        "judged_windows_spec": ",".join(sorted(specs)), "selected": selected,
         "payload_windows": prompt.get("payload_windows", []),
         "payload_windows_per_site": prompt.get("payload_windows_per_site", []),
         "n_windows": prompt.get("n_windows"), "n_eligible": prompt.get("n_eligible"),
@@ -139,7 +154,7 @@ def _append_index(out_root: Path, job: Job, run_dir: Path) -> None:
     with _INDEX_LOCK:
         if any(r.get("run_id") == job.run_id for r in read_rows(idx)):
             return
-        with JsonlWriter(idx, job.run_id) as w:
+        with JsonlWriter(idx, job.run_id, repair_tail=False) as w:
             w.write({"path": str(run_dir.relative_to(out_root)), "exp_id": job.exp_id, "system_id": job.system_id})
 
 
@@ -189,6 +204,9 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
                         threshold_ids=[jr.get("operating_point", "F5")], parent_run_ids=job.parent_run_ids)
     events_path = run_dir / "events.jsonl"
     done, attempt = _done_requests(events_path) if (run_dir / "lineage.json").exists() else (set(), 0)
+    # a request counts as done only with both its terminal event and its outcomes_run row (a kill
+    # between the two re-runs it with attempt + 1; by_request keeps the latest attempt)
+    done &= {r["request_id"] for r in read_rows(run_dir / "outcomes_run.jsonl")}
     collector = Collector(job.run_id, events_path)
     records = RecordStore(run_dir / "records", job.run_id)
     ctx = RunContext(job.run_id, job.exp_id, run_dir, clock, job.seed, lin, records, collector.emit, log, attempt)
@@ -223,6 +241,9 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
     events = [event_from_row(r) for r in read_rows(events_path)]
     log_text = (run_dir / "server.log").read_text() if (run_dir / "server.log").exists() else ""
     checks = run_checks(events, info.flags, expected_requests=[r.request_id for r in reqs], log_text=log_text)
+    have_rows = {r["request_id"] for r in read_rows(run_dir / "outcomes_run.jsonl")}
+    missing = sorted({r.request_id for r in reqs} - have_rows)
+    checks.append(Check("all_requests_have_outcomes", not missing, ", ".join(missing[:5])))
     atomic_write_json(run_dir / "checks.json", [c.to_json() for c in checks])
     lin = close_lineage(run_dir, lin)
     _append_index(out_root, job, run_dir)

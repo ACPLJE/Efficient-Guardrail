@@ -51,7 +51,9 @@ def test_block_before_generation(tmp_path):
     per = events(d)
     outcomes = {o["unit_id"]: o for o in rows(d / "outcomes.jsonl")}
     blocked = [rid for rid, o in outcomes.items() if o["blocked"]]
-    assert blocked and all(outcomes[r]["is_attack"] or outcomes[r]["false_block"] for r in blocked)
+    assert blocked and all(outcomes[r]["is_attack"] and outcomes[r]["block_reason"] == "inj_window" for r in blocked)
+    assert not any(o["false_block"] for o in outcomes.values())
+    assert {r for r, o in outcomes.items() if o["is_attack"]} == set(blocked)
     for rid in blocked:
         types = {e.type for e in per[rid]}
         assert E.REQUEST_BLOCKED in types and E.PREFILL_START not in types
@@ -64,6 +66,69 @@ def test_block_before_generation(tmp_path):
         assert next(e for e in evs if e.type == E.PREFILL_START).t_ns >= jd.t_ns
     nw = rows(d / "outcomes_run.jsonl")[0]["n_eligible"]
     assert max(o["judged_windows"] for o in outcomes.values()) == nw
+
+
+def test_block_before_generation_passed_requests_keep_selection(tmp_path):
+    # tau so high that nothing is blocked: chunk 0 must still report the pre-generation selection
+    d = run_overlay(tmp_path, "b1a", "B1a", {"block_before_generation": True, "selector": {"rule": "all"},
+                                             "thresholds": {"MJ": {"F5": 0.99999}}})["B1a"]
+    assert checks_ok(d)
+    for o in rows(d / "outcomes.jsonl"):
+        assert not o["blocked"] and len(o["selected"]["0"]) == o["judged_windows"] > 0
+        if o["is_attack"]:
+            assert o["hit_live"] == {"8": True}
+
+
+def test_block_before_generation_counts_cache_hits(tmp_path):
+    d = run_overlay(tmp_path, "b1g", "B1G", {"block_before_generation": True, "selector": {"rule": "all"},
+                                             "verdict_cache": "global",
+                                             "thresholds": {"MJ": {"F5": 0.99999}}})["B1G"]
+    assert checks_ok(d)
+    runrows = rows(d / "outcomes_run.jsonl")
+    assert all(r["judged_windows"] == r["n_eligible"] for r in runrows)      # cache hits count as judged
+    assert sum(r["judged_windows_uncached"] for r in runrows) < sum(r["judged_windows"] for r in runrows)
+
+
+def test_block_before_generation_rejects_ledger_rules(tmp_path):
+    from ag.config.schema import ConfigError
+    with pytest.raises(ConfigError, match="before prefill"):
+        run_overlay(tmp_path, "bad", "BAD", {"block_before_generation": True})
+
+
+def test_rbv_stops_judging_once_unsafe_is_known(tmp_path):
+    d = run_overlay(tmp_path, "n5", "N5", {"release_before_verdict": True})["N5"]
+    assert checks_ok(d)
+    for rid, evs in events(d).items():
+        unsafe = [e.t_ns for e in evs if e.type == E.JOB_DONE and any(v.unsafe for v in e.verdicts)]
+        if unsafe:
+            assert not [e for e in evs if e.type == E.JOB_SUBMITTED and e.t_ns > min(unsafe)], rid
+
+
+def test_late_unsafe_verdict_counts_for_fpr_inj(tmp_path):
+    # B1b with a fast target: every chunk is out before the verdict; false positives still count
+    d = run_overlay(tmp_path, "b1b", "B1b", {"release_before_verdict": True,
+                                             "mock": {"tpot_ms": 0.1, "judge": {"false_positive_rate": 0.15}}})["B1b"]
+    assert checks_ok(d)
+    per = events(d)
+    outcomes = {o["unit_id"]: o for o in rows(d / "outcomes.jsonl")}
+    flagged = [rid for rid, evs in per.items()
+               if any(e.type == E.JOB_DONE and any(v.unsafe for v in e.verdicts) for e in evs)]
+    benign_flagged = [r for r in flagged if not outcomes[r]["is_attack"]]
+    assert benign_flagged
+    assert all("inj_window" in outcomes[r]["block_reasons"] for r in flagged)
+    assert load_json(d / "summary.json")["fpr_inj"]["num"] == len(benign_flagged)
+
+
+def test_blocked_units_have_zero_utility(tmp_path):
+    # the review's reproduction: a benign unit released at chunk 0 (ANSWER delivered), blocked at chunk 1
+    d = run_overlay(tmp_path, "fp", "FP", {"mock": {"judge": {"false_positive_rate": 0.15}}},
+                    data={"length_classes": ["8k"], "n_attack": 8, "n_benign": 8},
+                    fairness={"max_new_tokens": 64})["FP"]
+    outcomes = rows(d / "outcomes.jsonl")
+    assert any(o["blocked"] and not o["is_attack"] for o in outcomes)
+    assert all(o["utility"] is False for o in outcomes if o["blocked"])
+    success = {r["unit_id"]: r for r in rows(d / "success.jsonl")}
+    assert any(success[o["unit_id"]]["utility"] for o in outcomes if o["blocked"])   # raw judge verdict kept
 
 
 def test_deadline_miss_fails_closed(tmp_path):

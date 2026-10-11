@@ -1,5 +1,6 @@
 """plots/fig09.py on the committed mock fixture (no GPU, no harness run)."""
 import csv
+import json
 import shutil
 import subprocess
 import sys
@@ -42,9 +43,13 @@ def test_fig09_on_fixture(tmp_path):
 def test_fig09_rejects_fixture_without_allow_mock(tmp_path):
     out = tmp_path / "results"
     shutil.copytree(FIX, out)
+    for lp in (out / "raw" / "mock").glob("*/lineage.json"):      # clean tree: only is_mock can reject
+        lin = json.loads(lp.read_text())
+        lin.update(code_dirty=False, code_commit=lin["code_commit"].removesuffix("-dirty"))
+        lp.write_text(json.dumps(lin))
     r = subprocess.run([sys.executable, str(ROOT / "plots" / "fig09.py"), "--out", str(out), "--exp", "mock",
                         "--run-id", _run_ids()[0]], capture_output=True, text=True)
-    assert r.returncode == 1 and "mock" in r.stderr
+    assert r.returncode == 1 and "mock / virtual-clock run" in r.stderr, r.stderr
 
 
 def test_test_manifests_classify_every_module():

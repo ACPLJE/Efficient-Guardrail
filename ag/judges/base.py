@@ -59,7 +59,13 @@ def cache_key(judge: Judge, x: JudgeInput) -> tuple:
 class VerdictCache:
     """Policy off | per_request | global (D-011). Hits create no job (SPEC 4.6)."""
 
+    POLICIES = ("off", "per_request", "global")
+
     def __init__(self, policy: Literal["off", "per_request", "global"] = "per_request"):
+        if policy is False:          # YAML 1.1 reads an unquoted `off` as false
+            policy = "off"
+        if policy not in self.POLICIES:
+            raise ValueError(f"verdict_cache must be one of {self.POLICIES}, got {policy!r}")
         self.policy = policy
         self._d: dict[tuple, Verdict] = {}
         self._lock = threading.Lock()

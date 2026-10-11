@@ -63,6 +63,24 @@ def test_deadline_and_client_wait():
     assert "client_wait_bounded" in failed(late)
 
 
+def test_late_verdict_blocked_with_wrong_reason():
+    # verdict after the deadline, chunk blocked at verdict time as inj_window: must be deadline_miss at 100
+    v = Verdict("MJ", "q", 0, 1, "128x2", 0.9, 0.5, "F5", True, 500, 5)
+    evs = [ev(0, E.ARRIVED), ev(0, E.ADMITTED), ev(1, E.PREFILL_START), ev(5, E.PREFILL_DONE),
+           ev(20, E.CHUNK_GENERATED, chunk_id=0, required_jobs=("j",)),
+           ev(20, E.JOB_SUBMITTED, job_id="j", deadline_ns=100), ev(500, E.JOB_DONE, job_id="j", verdicts=(v,)),
+           ev(501, E.CHUNK_BLOCKED, chunk_id=0, reason="inj_window"), ev(510, E.FINISHED)]
+    assert "invariants.deadline_fail_closed" in failed(evs)
+    ok = [e if e.type != E.CHUNK_BLOCKED else ev(100, E.CHUNK_BLOCKED, chunk_id=0, reason="deadline_miss")
+          for e in evs]
+    assert "invariants.deadline_fail_closed" not in failed(ok)
+
+
+def test_one_decision_per_chunk():
+    evs = good() + [ev(32, E.CHUNK_BLOCKED, chunk_id=0, reason="inj_window")]
+    assert "invariants.one_decision_per_chunk" in failed(evs)
+
+
 def test_prefill_after_request_blocked():
     evs = [ev(0, E.ARRIVED), ev(0, E.ADMITTED), ev(1, E.PREFILL_START), ev(2, E.REQUEST_BLOCKED, reason="x"),
            ev(3, E.FINISHED)]

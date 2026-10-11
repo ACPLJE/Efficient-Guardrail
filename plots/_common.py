@@ -36,7 +36,9 @@ def add_common_args(ap: argparse.ArgumentParser, *, default_exp: str) -> None:
     ap.add_argument("--exp", default=default_exp, help="experiment id used with --run-id latest")
     ap.add_argument("--run-id", action="append", default=None, help="run id or 'latest' (repeatable)")
     ap.add_argument("--allow-mock", action="store_true", help="accept mock / virtual-clock / dirty runs")
-    ap.add_argument("--allow-mixed", action="store_true", help="accept runs with different code or data")
+    ap.add_argument("--allow-mixed-data", action="store_true",
+                    help="accept runs with different data (e.g. a data job axis); code must still match")
+    ap.add_argument("--allow-mixed", action="store_true", help="accept runs with different code and data")
     ap.add_argument("--fig-dir", default=None, help="output dir for the PDF (default $AG_OUT/figures)")
 
 
@@ -89,7 +91,8 @@ def load_runs(args: argparse.Namespace) -> list[tuple[Path, dict[str, Any]]]:
     for rid in ids:
         d = run_dir_of(out_root, rid, args.exp)
         runs.append((d, check_run(d, allow_mock=args.allow_mock)))
-    check_consistent([l for _, l in runs], allow_mixed=args.allow_mixed)
+    keys = ("code_commit",) if args.allow_mixed_data else ("code_commit", "data_manifest_sha")
+    check_consistent([l for _, l in runs], allow_mixed=args.allow_mixed, keys=keys)
     return runs
 
 

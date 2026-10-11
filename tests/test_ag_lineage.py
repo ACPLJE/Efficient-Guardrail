@@ -39,6 +39,39 @@ def test_resume_same_and_mismatch(tmp_path):
     assert "hostname" not in RESUME_KEYS
 
 
+def _ok(d):
+    return all(c["ok"] for c in json.loads((d / "checks.json").read_text()))
+
+
+def test_resume_after_partial_write(tmp_path):
+    # a kill mid-write leaves half a line in events.jsonl; resume must cut it and finish cleanly
+    exp = small_exp(tmp_path, systems=["mock_b0"])
+    out = tmp_path / "out"
+    args = ["--config", str(exp), "--out", str(out), "--ts", "20261011T000001"]
+    assert run_main(args) == 0
+    d = run_dirs(out)["B0"]
+    lines = (d / "events.jsonl").read_text().splitlines(keepends=True)
+    (d / "events.jsonl").write_text("".join(lines[:40]) + lines[40][: len(lines[40]) // 2])
+    assert run_main(args) == 0
+    assert _ok(d)
+    rows = [json.loads(l) for l in (d / "events.jsonl").read_text().splitlines()]
+    assert max(r["attempt"] for r in rows) == 1
+
+
+def test_resume_reruns_request_without_outcome_row(tmp_path):
+    exp = small_exp(tmp_path, systems=["mock_b0"])
+    out = tmp_path / "out"
+    args = ["--config", str(exp), "--out", str(out), "--ts", "20261011T000002"]
+    assert run_main(args) == 0
+    d = run_dirs(out)["B0"]
+    rows = (d / "outcomes_run.jsonl").read_text().splitlines(keepends=True)
+    (d / "outcomes_run.jsonl").write_text("".join(rows[:-1]))        # killed between FINISHED and the row
+    assert run_main(args) == 0
+    assert _ok(d)
+    outcomes = [json.loads(l) for l in (d / "outcomes.jsonl").read_text().splitlines()]
+    assert len(outcomes) == len(rows)
+
+
 def test_cli_resume_patch_sha_only_exits_2(tmp_path):
     exp = small_exp(tmp_path, systems=["mock_b0"])
     out = tmp_path / "out"

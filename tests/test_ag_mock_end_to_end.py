@@ -35,6 +35,11 @@ def test_end_to_end_under_60s(tmp_path):
     assert s_b0["hit@8[union]"]["value"] >= 0.9                 # concentrated mock ledger
     assert s_ag["asr"]["value"] < s_b0["asr"]["value"]           # the gate blocks successful attacks
     assert s_ag["exposed_tokens_p99"]["value"] == 0
+    assert s_b0["exposed_tokens_p50"]["value"] is None and s_b0["exposed_tokens_p50"]["not_applicable"]
+    o_ag = [o for o in rows(ag / "outcomes.jsonl") if o["is_attack"]]
+    assert all("serving_best" in o["payload_rank"] and "union" in o["hit"] for o in o_ag)
+    assert {o["judged_windows_spec"] for o in rows(ag / "outcomes.jsonl")} == {"128x2"}
+    assert all(r["source"] == "mock" for r in rows(b0 / "hits.jsonl"))
     idx = [json.loads(l) for l in (out / "raw" / "index.jsonl").read_text().splitlines()]
     assert {r["run_id"] for r in idx} == {b0.name, ag.name}
     assert not (out / "raw" / "mock" / "latest.txt").exists()

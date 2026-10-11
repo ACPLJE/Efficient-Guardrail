@@ -49,6 +49,18 @@ def test_unimplemented_and_validation():
         chunk_block_mass(rec, ChunkInfo(0, 0, 8), SelectorConfig(layers=(9,)))
 
 
+def test_named_layers_need_target_info_on_partial_records():
+    import dataclasses
+    rec = dataclasses.replace(_record(L=4), layers=np.array([4, 5, 6, 7], dtype=np.int16))   # tracked8 of 8
+    c = ChunkInfo(0, 0, 8)
+    with pytest.raises(ValueError, match="layers='all'"):
+        chunk_block_mass(rec, c, SelectorConfig(layers="tracked8"))
+    m = chunk_block_mass(rec, c, SelectorConfig(layers="tracked8"), n_target_layers=8)
+    assert np.allclose(m, chunk_block_mass(rec, c, SelectorConfig(layers=(4, 5, 6, 7))))
+    with pytest.raises(ValueError, match="not in the Record"):
+        chunk_block_mass(rec, c, SelectorConfig(layers="all"), n_target_layers=8)
+
+
 def test_select_rules():
     s = np.array([0.2, -np.inf, 0.5, 0.5, 0.1])
     assert select(s, SelectorConfig(k=2)) == (2, 3)                   # tie -> lower id first

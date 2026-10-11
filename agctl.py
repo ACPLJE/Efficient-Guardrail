@@ -32,20 +32,24 @@ SBATCH_HEADER = """#!/bin/bash
 #SBATCH -c {cpus}
 #SBATCH -t {time}
 #SBATCH -o {log_dir}/%x.%A_%a.out
-{array_line}source "{repo}/slurm/ag_common.sh"
+{array_line}export AG_OUT="{out}"
+source "{repo}/slurm/ag_common.sh"
 """
 
 
 def render_sbatch(*, name: str, config: str, ts: str, out: str, n_jobs: int, offset: int, gres: str = "gpu:1",
                   partition: str = "RTX6000ADA", cpus: int = 8, time_limit: str = "24:00:00",
-                  log_dir: str | None = None) -> str:
+                  log_dir: str | None = None, clock: str | None = None) -> str:
+    """One sbatch script for jobs [offset, offset + n_jobs) of an expand. The log directory must exist
+    before submission (Slurm does not create the -o directory); cmd_run creates it."""
     if not re.fullmatch(r"gpu:\d+", gres):
         raise ValueError(f"--gres must be gpu:N (QOSMinGRES), got {gres!r}")
     array_line = f"#SBATCH --array=0-{n_jobs - 1}\n" if n_jobs > 1 else ""
     idx = "${SLURM_ARRAY_TASK_ID:-0}"
     body = SBATCH_HEADER.format(name=name, partition=partition, gres=gres, cpus=cpus, time=time_limit,
-                                log_dir=log_dir or f"{out}/logs", array_line=array_line, repo=REPO)
-    body += (f'"$PY" -m ag.harness.run --config "{config}" --out "{out}" --ts {ts} '
+                                log_dir=log_dir or f"{out}/logs", array_line=array_line, repo=REPO, out=out)
+    clock_arg = f"--clock {clock} " if clock else ""
+    body += (f'"$PY" -m ag.harness.run --config "{config}" --out "{out}" --ts {ts} {clock_arg}'
              f'--job-index $(( {idx} + {offset} ))\n')
     if "%" in array_line:
         raise AssertionError("array throttle (%N) is forbidden")
@@ -74,6 +78,8 @@ def cmd_run(a: argparse.Namespace) -> int:
     waves = [[j for j in jobs if not j.parent_run_ids], [j for j in jobs if j.parent_run_ids]]
     script_dir = Path(out) / "raw" / exp["exp_id"] / "jobs"
     script_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(out).resolve() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)       # Slurm cannot open -o in a missing directory
     scripts: list[Path] = []
     offset = 0
     for wi, wave in enumerate(waves):
@@ -82,7 +88,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         text = render_sbatch(name=f"ag-{exp['exp_id']}-w{wi}", config=str(Path(a.config).resolve()), ts=ts,
                              out=str(Path(out).resolve()), n_jobs=len(wave), offset=offset,
                              gres=slurm.get("gres", "gpu:1"), partition=slurm.get("partition", "RTX6000ADA"),
-                             time_limit=slurm.get("time", "24:00:00"))
+                             time_limit=slurm.get("time", "24:00:00"), log_dir=str(log_dir), clock=a.clock)
         p = script_dir / f"{ts}.w{wi}.sbatch"
         p.write_text(text)
         scripts.append(p)

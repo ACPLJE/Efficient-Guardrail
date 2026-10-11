@@ -113,14 +113,38 @@ def load_system(name: str, systems_dir: str | Path | None = None, _seen: tuple[s
         if "impl" not in d or "system_id" not in d:
             raise ConfigError(f"{path}: base system file needs system_id and impl")
         out = {"system_id": d["system_id"], "impl": d["impl"], "flags": dict(d.get("flags") or {})}
-    validate_flags(out["flags"], path)
+    out["flags"] = validate_flags(out["flags"], path)
     return out
 
 
-def validate_flags(flags: Mapping[str, Any], where: Any = "") -> None:
-    """SPEC 9.1 validation rules."""
-    if flags.get("release_before_verdict") and flags.get("block_before_generation"):
+# SPEC 9.1 enum flags. YAML 1.1 reads unquoted off/on as booleans; they are mapped back first.
+ENUM_FLAGS = {
+    "harm_scan": ("off", "parallel", "blocking"), "output_guard": ("off", "on"), "inj_path": ("off", "on"),
+    "verdict_cache": ("off", "per_request", "global"), "scheduler": ("none", "fifo", "edf"),
+    "ledger_export": ("off", "sync", "async"), "scorer_combine": ("none", "union_topk"),
+}
+
+
+def validate_flags(flags: Mapping[str, Any], where: Any = "") -> dict[str, Any]:
+    """SPEC 9.1 validation rules. Returns the flags with YAML booleans mapped back to off / on."""
+    out = dict(flags)
+    for k, allowed in ENUM_FLAGS.items():
+        if k not in out:
+            continue
+        v = out[k]
+        if v is False:
+            v = "off"
+        elif v is True and "on" in allowed:
+            v = "on"
+        if v not in allowed:
+            raise ConfigError(f"{where}: {k} must be one of {allowed}, got {out[k]!r}")
+        out[k] = v
+    if out.get("release_before_verdict") and out.get("block_before_generation"):
         raise ConfigError(f"{where}: release_before_verdict and block_before_generation are exclusive")
-    sel = flags.get("selector") or {}
+    sel = out.get("selector") or {}
     if sel.get("head_weighting") == "learned" and sel.get("first_token", "skip") != "skip":
         raise ConfigError(f"{where}: selector.head_weighting=learned needs selector.first_token=skip")
+    if out.get("block_before_generation") and sel.get("rule", "topk") in ("topk", "mass_threshold"):
+        raise ConfigError(f"{where}: block_before_generation judges before prefill (no ledger yet); "
+                          "selector.rule must be all | oracle | random")
+    return out

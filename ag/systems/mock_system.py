@@ -13,6 +13,7 @@ simulation under VirtualClock and a paced replay under MonotonicClock.
 """
 from __future__ import annotations
 
+import dataclasses
 import traceback
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -66,15 +67,17 @@ class MockSystem(System):
         if f.get("release_before_verdict") and f.get("block_before_generation"):
             raise ValueError("release_before_verdict and block_before_generation are exclusive (SPEC 9.1)")
         tgt = dict(m.get("target", {}))
+        exp = cfg.exp
+        rec = exp.get("record")
+        if rec and "split_tokens" in rec:          # Records and the target use one block size
+            tgt.setdefault("split_tokens", int(rec["split_tokens"]))
         self.target = MockTarget(tgt.pop("kind", "synthetic"), seed=ctx.seed, **tgt)
         self.prefill_ns_per_token = int(m.get("prefill_us_per_token", 20.0) * 1e3)
         self.tpot_ns = int(m.get("tpot_ms", 20.0) * 1e6)
         self.gate_ns = int(m.get("gate_us", 50.0) * 1e3)
-        exp = cfg.exp
         fair = dict(exp.get("fairness", {}))
         self.max_new = int(fair.get("max_new_tokens", 64))
         self.chunking = ChunkingConfig(**dict(f.get("chunking", exp.get("chunking", {}))))
-        rec = exp.get("record")
         self.record_spec = RecordSpec(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in rec.items()}) \
             if (rec and self.gate == "none" and f.get("write_records", True)) else None
         self.t_source = "virtual" if ctx.clock.kind == "virtual" else ("client" if self.gate == "none" else "engine")
@@ -86,6 +89,9 @@ class MockSystem(System):
             self.selector.validate()
             if self.selector.rule == "oracle" and not f.get("evaluation_only", False):
                 raise ValueError("selector.rule=oracle needs evaluation_only: true in a live run (SPEC 9.1)")
+            if f.get("block_before_generation") and self.selector.rule in ("topk", "mass_threshold"):
+                raise ValueError("block_before_generation judges before prefill, when no ledger exists yet; "
+                                 "use selector.rule all | oracle | random")
             jcfg = dict(m.get("judge", {}))
             self.judge = MockJudge(f.get("judge", "MJ"), seed=ctx.seed, **jcfg)
             op = exp.get("operating_point", "F5")
@@ -99,7 +105,8 @@ class MockSystem(System):
             self.release_budget_ns = int(dict(f.get("deadline_budget_ms", {})).get("release", 1000) * 1e6)
             # live ledger: fp32, only what the selector reads
             self.live_spec = RecordSpec(layers="all", per_chunk_heads=False, gen_mass=False,
-                                        first_token=self.selector.first_token == "include", precision="fp32")
+                                        first_token=self.selector.first_token == "include", precision="fp32",
+                                        split_tokens=self.target.split_tokens)
 
     def reset(self) -> None:
         if self.gate == "ag":
@@ -181,7 +188,11 @@ class MockSystem(System):
         for x in inputs:
             key = cache_key(self.judge, x)
             v = self.cache.get(req.request_id, key)
-            (cached.append(v) if v is not None else miss.append((x, key)))
+            if v is None:
+                miss.append((x, key))
+            else:       # re-stamp: a global hit may carry another request's ids
+                cached.append(dataclasses.replace(v, request_id=req.request_id, chunk_id=chunk_id,
+                                                  window_id=x.window_id, cached=True))
         cached_ns = max((v.decided_ns for v in cached), default=None)
         verdicts = list(cached)
         job_id, done = None, None
@@ -196,7 +207,7 @@ class MockSystem(System):
                            self.tau, self.threshold_id, is_unsafe(s, self.tau), done, done - start)
                    for x, s in zip(batch, scores)]
             for (x, key), v in zip(miss, new):
-                self.cache.put(req.request_id, key, Verdict(**{**v.__dict__, "cached": True}))
+                self.cache.put(req.request_id, key, dataclasses.replace(v, cached=True))
             common = dict(job_id=job_id, job_kind=JobKind.INJ_JUDGE, chunk_id=chunk_id,
                           window_ids=tuple(x.window_id for x in batch), **att)
             tl.add(E.JOB_SUBMITTED, t_submit, deadline_kind=DeadlineKind.RELEASE if deadline_ns else DeadlineKind.NONE,
@@ -217,14 +228,16 @@ class MockSystem(System):
         pool_free = t0
         s = t0
         pre_job, pre_done, pre_cached = None, None, None
+        pre_wins: tuple[int, ...] = ()
+        pre_cached_w: list[int] = []
         if self.bbg:   # judge before generation; chunk 0 carries the job, later chunks are exempt
-            sc = window_scores(chunk_block_mass(rec, chunks[0], self.selector, n_target_layers=self.target.n_layers),
-                               rp) if self.selector.rule not in ("all", "oracle") else _eligible_scores(rp)
-            wins = select(sc, self.selector, oracle=rp.payload_windows, key=req.request_id)
-            pre_job, pre_done, pre_cached, vs, pool_free = self._judge(tl, req, rp, None, wins, t0, pool_free, att,
-                                                                       deadline_ns=None)
+            # no ledger exists before prefill: only rules that do not need it (setup() enforces this)
+            pre_wins = select(_eligible_scores(rp), self.selector, oracle=rp.payload_windows, key=req.request_id)
+            pre_job, pre_done, pre_cached, vs, pool_free = self._judge(tl, req, rp, None, pre_wins, t0, pool_free,
+                                                                       att, deadline_ns=None)
+            pre_cached_w = [v.window_id for v in vs if v.cached]
             t_ok = max(x for x in (t0, pre_done, pre_cached) if x is not None)
-            sel_payload = {"selected": list(wins), "cached_windows": []}
+            sel_payload = {"selected": list(pre_wins), "cached_windows": pre_cached_w}
             if any(v.unsafe for v in vs):
                 tl.add(E.REQUEST_BLOCKED, t_ok + self.gate_ns, reason="inj_window", payload=sel_payload, **att)
                 gen = Generation(req.request_id, (), "", "", (), (), True, "inj_window")
@@ -246,19 +259,25 @@ class MockSystem(System):
             text = " ".join(words[c.tok_start:c.tok_end])
             gen_chunks.append(c)
             tl.add(E.TOKENS, g, tok_range=(c.tok_start, c.tok_end), **att)
+            cached_w: list[int] = []
             if self.bbg and c.chunk_id >= 1:
                 job_id, done, cached_ns, vs = None, None, None, []
                 wins: tuple[int, ...] = ()
-            elif self.bbg:
-                job_id, done, cached_ns, vs, wins = pre_job, pre_done, pre_cached, [], ()
+            elif self.bbg:      # chunk 0 carries the pre-generation job, selection and cache hits
+                job_id, done, cached_ns, vs, wins = pre_job, pre_done, pre_cached, [], pre_wins
+                cached_w = pre_cached_w
+            elif self.rbv and unsafe_at is not None and unsafe_at <= g:
+                # an unsafe verdict is already known: no new job, the chunk is gated by that verdict
+                job_id, done, cached_ns, vs, wins = None, None, unsafe_at, [], ()
             else:
-                sc = window_scores(chunk_block_mass(rec, c, self.selector, n_target_layers=self.target.n_layers), rp)
+                sc = window_scores(chunk_block_mass(rec, c, self.selector, n_target_layers=self.target.n_layers,
+                                                    attn_kind=self.target.layer_attn_kind), rp)
                 wins = select(sc, self.selector, oracle=rp.payload_windows, key=req.request_id)
                 job_id, done, cached_ns, vs, pool_free = self._judge(
                     tl, req, rp, c.chunk_id, wins, g, pool_free, att, deadline_ns=g + self.release_budget_ns,
                     chunk_text=text if self.judge.needs_chunk else None,
                     chunk_ids=tuple(out.output_ids[c.tok_start:c.tok_end]) if self.judge.needs_chunk else None)
-            cached_w = [v.window_id for v in vs if v.cached]
+            cached_w = cached_w or [v.window_id for v in vs if v.cached]
             tl.add(E.CHUNK_GENERATED, g, chunk_id=c.chunk_id, tok_range=(c.tok_start, c.tok_end),
                    required_jobs=(job_id,) if job_id else (), cached_verdict_ns=cached_ns,
                    payload={"selected": list(wins), "cached_windows": cached_w}, **att)

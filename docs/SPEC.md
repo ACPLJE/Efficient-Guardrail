@@ -9,7 +9,7 @@
 **변경 이력**
 
 - v1 (2026-10-10): 첫 초안.
-- v1.3 (2026-10-11): S1 걷는 뼈대 구현에서 SPEC이 정하지 않았던 세부를 적었다. `schema_version`은 1 그대로다(첫 실데이터 기록 전, 14절). NB = 1이면 창 1개(1.1), 이벤트 `payload` 키 관례(3.2), `SystemConfig`(4.2), `mass_threshold`의 S1 정의(4.5, D-039 열림), mock judge의 지연 모형 `Judge.latency_ns`(4.6), `hits.jsonl`·`outcomes_run.jsonl`의 추가 열과 hit 행의 `variant_id`에서 k 제외(7.3), `plots/numbers.py` → `plots/abstract_numbers.py`(7.4).
+- v1.3 (2026-10-11): S1 걷는 뼈대 구현에서 SPEC이 정하지 않았던 세부를 적었다. `schema_version`은 1 그대로다(첫 실데이터 기록 전, 14절). NB = 1이면 창 1개(1.1), 이벤트 `payload` 키 관례(3.2), `SystemConfig`(4.2), `mass_threshold`의 S1 정의(4.5, D-039 열림), mock judge의 지연 모형 `Judge.latency_ns`(4.6), `hits.jsonl`·`outcomes_run.jsonl`의 추가 열과 hit 행의 `variant_id`에서 k 제외(7.3), `plots/numbers.py` → `plots/abstract_numbers.py`(7.4). PR 리뷰 반영: `hits.jsonl`에 `source` 열(bootstrap 층화), `config_hash`에서 반복 횟수 `repeats` 제외(8.3), 실행 시 `--ts`의 jobs 파일과 run_id가 다르면 exit 2(7.1), resume는 `outcomes_run` 행까지 있어야 완료로 봄과 끊긴 마지막 줄 정리(7.1), checks 추가(`one_decision_per_chunk`, `all_requests_have_outcomes`, 마감 검사를 block된 chunk까지 확장, 7.4), YAML `off`/`on` 불리언을 enum 문자열로 되돌리고 값 검사, `block_before_generation`은 ledger가 필요 없는 선택 규칙만(9.1), B0의 판정 전 노출 토큰은 `not_applicable`(6.2).
 - v1.2 (2026-10-10): v1.1 재검증에서 남은 지적 35개를 반영했다(run_id에 target·shard·repeat, 운영점별 Outcome, FPR(inj) 사유 집합, tool sink 측정 지점, 조각별 hit, 차등 결과 파일 분리, resume 키 확장 등).
 - v1.1 (2026-10-10): 독립 검토 3건(실험 적용 범위, 지표 정확성, 구현 가능성)에서 확인된 지적 64개를 반영했다. 주요 변경: 다중 호출 episode 경로(2.5, 4.12), offline 변형 식별자 `variant_id`(2.4, 7), hit@k를 표준 정의와 서빙 합집합으로 분리(6.1), 판정 규칙을 `score > τ`로 통일(2.3), "같은 ASR" 운영점과 offline gate 재생(6.1), TPOT(보임) 분모 수정(6.2), 판정 전 노출 토큰의 V 정의 수정(6.2), goodput을 위반 비율로 정의(6.3), 보조 타입과 직렬화 규약(2.0, 2.7), 이벤트 수집기와 가상 시계 의미(3.5, 4.1), 단계별 결과 파일(7.3), sweep 축 명시(8.1), 유해 위협 라벨(2.1, 6.1), 2·4-GPU 구성(8.1), Record 크기 재계산(5.2).
 
@@ -932,7 +932,7 @@ class RecordStore:
 | release lag | `l_{r,j} − g_{r,j}`, release된 chunk만. block된 chunk는 `block_lag = b_{r,j} − g_{r,j}`로 따로 |
 | TPOT(보임) | `(d_{r,last} − d_{r,0}) / (N_vis − n_{r,0})`. 첫 chunk 이후 토큰당 간격. delivered chunk가 하나뿐이면 정의하지 않음 |
 | ITL(보임) | chunk j ≥ 1마다 `(d_{r,j} − d_{r,j−1}) / n_{r,j}`를 `n_{r,j}`번(SGLang 규칙) |
-| 판정 전 노출 토큰 | `Σ_{j∈J_r} n_{r,j} · 1[d_{r,j} < V_{r,j}]`. AG·B1a는 0이어야 함(E2.4), B1b·N5의 핵심 값. B0는 "해당 없음" |
+| 판정 전 노출 토큰 | `Σ_{j∈J_r} n_{r,j} · 1[d_{r,j} < V_{r,j}]`. AG·B1a는 0이어야 함(E2.4), B1b·N5의 핵심 값. B0는 "해당 없음"(summary.json에 `value: null, not_applicable: true`) |
 | gate 지연 | `l_{r,j} − max(g_{r,j}, V_{r,j})`. `V`가 유한한 release된 chunk만. E2.4 기준 ≤ 1 ms |
 | E2E(보임) | `d_{r,last} − a_r` |
 | ΔTTFV (Fig. 1 y축) | `P50(TTFV_X) / P50(TTFV_B0) − 1`, E4.2 W-Len 128k, 동시 실행 1. P95 값도 함께 |
@@ -1026,7 +1026,7 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 - **latest.txt 자격**(이 한 곳에서만 정의): `clock = "monotonic"` ∧ `code_dirty = false` ∧ 엔진이 `mock`이 아님 ∧ `checks.json`이 모두 ok. plots는 기본값으로 이 자격이 없는 run을 거부한다.
 - 쓰기는 모두 tmp 파일 + `os.replace`, JSONL은 락 하나로 줄 단위 append 후 flush. writer는 `ag/harness/writer.py`의 자체 구현이다(행마다 `run_id`, `schema_version`).
 - plots는 `request_id`로 `raw/data/<sha>/requests.jsonl`과 join해 `background_tier`, `source` 같은 속성을 가져온다.
-- **resume**: 같은 `run_id`로 다시 실행하면 기존 `lineage.json`과 resume 키(7.2)를 비교해 다르면 exit 2로 끝낸다. 같으면 `FINISHED` 또는 fatal `ERROR`가 이미 있는 `request_id`만 건너뛴다. 끊긴 요청은 `attempt`를 올려 다시 하고, 이전 attempt의 부분 이벤트는 지표에서 뺀다. offline 파일은 `(request_id, variant_id)`로 건너뛴다.
+- **resume**: 같은 `run_id`로 다시 실행하면 기존 `lineage.json`과 resume 키(7.2)를 비교해 다르면 exit 2로 끝낸다. 같으면 `FINISHED` 또는 fatal `ERROR`가 이미 있고 `outcomes_run.jsonl` 행도 있는 `request_id`만 건너뛴다(v1.3). 충돌로 남은 행 파일의 끊긴 마지막 줄은 이어 쓰기 전에 잘라 낸다(`raw/index.jsonl`처럼 여러 job이 함께 쓰는 파일은 제외). `--ts`로 같은 expand를 다시 부를 때 다시 펼친 run_id 목록이 `raw/<E>/jobs/<ts>.jsonl`과 다르면(설정이나 `--clock`이 바뀜) exit 2로 끝낸다(v1.3). 끊긴 요청은 `attempt`를 올려 다시 하고, 이전 attempt의 부분 이벤트는 지표에서 뺀다. offline 파일은 `(request_id, variant_id)`로 건너뛴다.
 
 ### 7.2 lineage.json
 
@@ -1052,7 +1052,7 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 | `events.jsonl` | 수집기, 실행 중 | Event + `schema_version` | `(request_id, attempt, seq)` |
 | `outcomes_run.jsonl` | 하네스, 요청이 끝날 때 | blocked, block_reason, block_reasons, error_kind, judged_windows*, judge_calls, selected, payload_windows, payload_windows_per_site, n_windows, n_eligible, prompt_len, harm_score, doc_scores, cost, generation(Generation 전체; hit_live는 score_outcomes가 outcomes에서 계산) | `(request_id, variant_id="live")` |
 | `success.jsonl` | `score_outcomes`, 실행 뒤 | `unit_id, variant_id, threshold_id, tau, attack_success, utility, success_judge` | `(unit_id, variant_id, threshold_id)` |
-| `hits.jsonl` | offline scorer | `request_id, variant_id, variant, chunk_def("first8"\|"first32"\|"all"\|"union"\|"serving:<id>"), site_rule("single"\|"any"\|"all"), k, hit, payload_rank, n_eligible, n_payload, m`(m = 무작위 기준의 m). hit 행의 `variant_id`는 k를 뺀 변형 입력의 해시다(k는 행의 열) | `(request_id, variant_id, chunk_def, site_rule, k)` |
+| `hits.jsonl` | offline scorer | `request_id, variant_id, variant, chunk_def("first8"\|"first32"\|"all"\|"union"\|"serving:<id>"), site_rule("single"\|"any"\|"all"), k, hit, payload_rank, source, n_eligible, n_payload, m`(source는 bootstrap 층화용, 6.1.3)(m = 무작위 기준의 m). hit 행의 `variant_id`는 k를 뺀 변형 입력의 해시다(k는 행의 열) | `(request_id, variant_id, chunk_def, site_rule, k)` |
 | `window_scores.jsonl` | offline judge·scorer. `source_id` = scorer_id 또는 judge_id | `request_id, target_id, source_id, variant_id, window_spec, judge_chunk("none"\|"first"\|"serving:<id>"), window_id, score, latency_ns, cached` | `(request_id, source_id, variant_id, window_spec, judge_chunk, window_id)` |
 | `outcomes.jsonl` | `score_outcomes`가 위 파일들과 B0 run의 success를 join해 만든 파생 파일 | Outcome(2.4) | `(unit_id, variant_id, threshold_id)` |
 | `probe_results.jsonl` | probe | `backbone, layer, rel_depth, task, negative_set, seed, auroc, tpr_at_fpr: {1e-3, 2e-4, 5e-5}` | `(backbone, layer, task, negative_set, seed)` |
@@ -1066,7 +1066,7 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 ### 7.4 summary.json, checks.json, numbers.json
 
 - `summary.json`: 지표 이름(names enum) → `{value, n, ci_low, ci_high, unit}`. 운영점별 임계값과 "도달 불가" 표시, ROC, 해결된 SLO 임계값, 시스템 info, 고른 variant_id(예: B1a의 창 체계), 실제/trace 입력 토큰 비.
-- `checks.json`: `[{name, ok, detail}]`. 예: `invariants`, `no_release_before_verdict`, `chunk_without_verdict`, `held_chunks_at_end == 0`, `judge_queue_empty`, `no_traceback_in_logs`, `shim_active_matches_system`, `fairness_knobs_equal`, `client_wait_bounded`, `b1a_b1c_same_judge`.
+- `checks.json`: `[{name, ok, detail}]`. 예: `invariants`, `no_release_before_verdict`, `chunk_without_verdict`, `held_chunks_at_end == 0`, `judge_queue_empty`, `no_traceback_in_logs`, `shim_active_matches_system`, `fairness_knobs_equal`, `client_wait_bounded`, `b1a_b1c_same_judge`. v1.3(S1 구현): `invariants.one_decision_per_chunk`(chunk마다 release·block 결정은 많아야 하나), `all_requests_have_outcomes`(요청마다 `outcomes_run` 행), `invariants.deadline_fail_closed`는 release된 chunk뿐 아니라 마감을 넘긴 chunk가 마감 + 1 ms 안에 `reason = deadline_miss`로 block됐는지도 본다.
 - `numbers.json`(초록 수치 7개, 계획서 9.3): `{ "abs1": {value, unit, ci, tag: "측정", source_run_ids, code_commit, target_id}, … }`. `plots/abstract_numbers.py`만 쓴다(`plots/numbers.py`라는 이름은 `python plots/<script>.py`로 실행할 때 표준 라이브러리 `numbers`를 가려 numpy import를 깨뜨리므로 쓰지 않는다). 초록 7의 분모는 타깃별 창 수(D-014)다.
 
 ## 8. 설정 (YAML)
@@ -1135,7 +1135,7 @@ override:
 
 ### 8.3 config_hash와 공정성 knob
 
-- `config_hash = canonical_hash(resolved_job − {notes, out_dir, slurm.time, slurm.partition, shard, repeat})`(`lgs1/lineage.canonical_hash`). `resolved_job`은 job 축 값을 확정한 job별 resolved 설정이다.
+- `config_hash = canonical_hash(resolved_job − {notes, out_dir, slurm.time, slurm.partition, shard, repeat, repeats})`(v1.3: 반복 횟수 `repeats`도 뺀다. shard 수 `slurm.shards`는 job이 맡는 요청 집합을 바꾸므로 남긴다)(`lgs1/lineage.canonical_hash`). `resolved_job`은 job 축 값을 확정한 job별 resolved 설정이다.
 - 한 실험 안 모든 시스템에서 같아야 하는 공정성 knob: `max_new_tokens, temperature, ignore_eos, dtype, kv_capacity_tokens, max_running_requests, chunked_prefill_size, attention_backend, cuda_graph, target revision`. AG 계열끼리는 `chunking`도 같아야 한다(B0는 chunking이 없다). 하네스가 실행 전에 비교하고 다르면 실패한다(`checks.fairness_knobs_equal`). 다르게 하는 것이 실험 축이면(E2.3의 backend) 실험 파일의 `fairness_exempt`에 적는다.
 
 ## 9. 시스템 카탈로그
@@ -1173,7 +1173,7 @@ B1a, B1b, B1c, B-full, B-oracle, N1–N6, AG 누적 ablation은 모두 AG 플러
 | `placement` | {guard, judge}: same \| gpuN | same | E4.6 공존 대 전용 |
 | `evaluation_only` | bool | false | 정답 정보를 쓰는 live run 표시(B-oracle). latest.txt·서빙 지표에 쓰지 않음 |
 
-검증 규칙: `release_before_verdict`와 `block_before_generation`은 함께 켤 수 없다. `selector.rule = oracle`은 offline run 또는 `evaluation_only: true`인 live run에서만 허용한다(정답 창을 쓰므로). `selector.head_weighting = learned`면 `selector.first_token = skip`이어야 한다(4.5).
+검증 규칙: `release_before_verdict`와 `block_before_generation`은 함께 켤 수 없다. `selector.rule = oracle`은 offline run 또는 `evaluation_only: true`인 live run에서만 허용한다(정답 창을 쓰므로). `selector.head_weighting = learned`면 `selector.first_token = skip`이어야 한다(4.5). `block_before_generation`은 prefill 전에 판정하므로 ledger가 아직 없다. 선택 규칙은 `all | oracle | random`만 쓴다(v1.3). enum 플래그(`harm_scan`, `output_guard`, `inj_path`, `verdict_cache`, `scheduler`, `ledger_export`, `scorer_combine`)는 YAML이 따옴표 없는 `off`/`on`을 불리언으로 읽으므로 로더가 `"off"`/`"on"`으로 되돌린 뒤 허용 값인지 검사한다(v1.3).
 
 ### 9.2 시스템별 매핑 (계획서 7.2)
 

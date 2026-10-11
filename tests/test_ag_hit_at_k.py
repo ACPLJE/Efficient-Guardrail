@@ -45,6 +45,30 @@ def test_per_site_any_all():
     assert _get(rows, "union", 1, "any")["hit"] and not _get(rows, "union", 1, "all")["hit"]
 
 
+def test_hit_rows_carry_source_and_ci_is_stratified():
+    rec = _rec(48, 10, {8: range(40, 48), 2: range(0, 40)})
+    rows = hits_for_record(rec, REQ, [7], [], ChunkingConfig(), VARIANTS)
+    assert all(r["source"] == REQ.source for r in rows)
+    # two sources, one all-hit, one all-miss, rows without a source column: stratum from request_id
+    rows = [{"request_id": f"{src}/test/8k/{i:06d}/a/t00", "variant_id": "v", "chunk_def": "union",
+             "site_rule": "single", "k": 8, "hit": src == "srcA"} for src in ("srcA", "srcB") for i in range(20)]
+    out = hit_rate(rows, chunk_def="union", k=8, units={r["request_id"] for r in rows})
+    assert out["value"] == 0.5 and out["ci_low"] == out["ci_high"] == 0.5
+
+
+def test_summary_has_per_site_hits():
+    from ag.metrics.score import summarize
+    hit_rows = [{"request_id": "r", "variant_id": "v", "chunk_def": cd, "site_rule": rule, "k": 8, "hit": h,
+                 "n_eligible": 10, "n_payload": 2, "m": 8}
+                for cd, rule, h in (("union", "single", True), ("union", "any", True), ("union", "all", False),
+                                    ("first8", "single", True), ("first32", "single", True), ("all", "single", True))]
+    o = {"unit_id": "r", "is_attack": True, "attack_success_b0": True, "labels": {"inj": True}, "error_kind": None,
+         "judged_windows": 0, "judged_windows_uncached": 0, "judge_calls": 0, "blocked": False, "utility": True,
+         "attack_success": True, "block_reasons": []}
+    s = summarize([o], hit_rows, {}, default_vid="v", ks=[8])
+    assert s["hit@8[union_any]"]["value"] == 1.0 and s["hit@8[union_all]"]["value"] == 0.0
+
+
 def test_hit_rate_and_random_baseline():
     rows = [{"request_id": f"r{i}", "variant_id": "v", "chunk_def": "union", "site_rule": "single", "k": 8,
              "hit": i < 3, "n_eligible": 255, "n_payload": 1, "m": 8, "source": "s"} for i in range(4)]

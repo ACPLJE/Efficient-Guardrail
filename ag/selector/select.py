@@ -69,8 +69,10 @@ def record_layer_index(rec: LedgerRecord, cfg: SelectorConfig, *, n_target_layer
     elif n_target_layers is not None:
         want = resolve_layers(cfg.layers, n_target_layers, attn_kind)
     else:
-        idx = resolve_layers(cfg.layers, len(recorded))
-        want = tuple(recorded[i] for i in idx)
+        if recorded != list(range(len(recorded))):
+            raise ValueError(f"{rec.request_id}: layer spec {cfg.layers!r} on a Record not written with layers='all' "
+                             f"(has {recorded}); pass n_target_layers / attn_kind")
+        want = resolve_layers(cfg.layers, len(recorded))
     missing = [l for l in want if l not in recorded]
     if missing:
         raise ValueError(f"{rec.request_id}: layers {missing} not in the Record (has {recorded})")

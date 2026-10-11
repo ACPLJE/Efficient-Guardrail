@@ -92,6 +92,12 @@ def test_http_sse_stream(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as ei:
             urllib.request.urlopen(bad, timeout=10)
         assert ei.value.code == 400
+        bad_stream = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+                                            data=b'{"messages": [], "stream": true}',
+                                            headers={"Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(bad_stream, timeout=10)
+        assert ei.value.code == 400 and b"messages is empty" in ei.value.read()
     finally:
         srv.shutdown()
         col.close()

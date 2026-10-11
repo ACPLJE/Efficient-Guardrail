@@ -2,7 +2,7 @@
 import pytest
 import yaml
 
-from _ag_util import SKELETON, small_exp
+from _ag_util import SKELETON, SYSTEMS, small_exp
 from ag.config.schema import ConfigError, deep_merge, load_exp, load_system
 from ag.sweep.expand import config_hash, expand, make_run_id
 
@@ -46,6 +46,28 @@ def test_job_axes_and_shards(tmp_path):
             (pid,) = j.parent_run_ids
             p_job = next(x for x in jobs if x.run_id == pid)
             assert (p_job.shard, p_job.data_tag) == (j.shard, j.data_tag)
+
+
+def test_repeat_count_not_in_hash():
+    exp = load_exp(SKELETON)
+    h1 = expand(exp, ts="t")[0].config_hash
+    h3 = [j.config_hash for j in expand({**exp, "repeats": 3}, ts="t") if j.repeat == 0][0]
+    assert h1 == h3
+
+
+def test_yaml_off_is_normalised(tmp_path):
+    from ag.judges.base import VerdictCache
+    (tmp_path / "base.yaml").write_text((SYSTEMS / "mock_ag.yaml").read_text())
+    (tmp_path / "x.yaml").write_text("base: base.yaml\nsystem_id: X\noverride:\n  verdict_cache: off\n"
+                                     "  output_guard: off\n")
+    s = load_system(str(tmp_path / "x.yaml"))
+    assert s["flags"]["verdict_cache"] == "off" and s["flags"]["output_guard"] == "off"
+    (tmp_path / "y.yaml").write_text("base: base.yaml\nsystem_id: Y\noverride:\n  verdict_cache: sometimes\n")
+    with pytest.raises(ConfigError, match="verdict_cache"):
+        load_system(str(tmp_path / "y.yaml"))
+    assert VerdictCache(False).policy == "off"
+    with pytest.raises(ValueError):
+        VerdictCache("bogus")
 
 
 def test_validation_errors(tmp_path):

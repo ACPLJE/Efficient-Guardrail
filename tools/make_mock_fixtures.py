@@ -38,11 +38,11 @@ def main() -> int:
             "base": "mock_b0.yaml", "system_id": "B0",
             "override": {"mock": {"target": {"concentration": 0.03}}}}))
         out = td / "out"
-        for name in ("mock_b0.yaml", "mock_b0_noise.yaml"):
+        for i, name in enumerate(("mock_b0.yaml", "mock_b0_noise.yaml")):
             e = dict(exp, systems=[str(sysdir / name)])
             p = td / f"exp_{name}"
             p.write_text(yaml.safe_dump(e))
-            assert run_main(["--config", str(p), "--out", str(out), "--ts", TS]) == 0
+            assert run_main(["--config", str(p), "--out", str(out), "--ts", f"{TS[:-1]}{i}"]) == 0
         if DEST.exists():
             shutil.rmtree(DEST)
         for d in sorted((out / "raw" / "mock").iterdir()):

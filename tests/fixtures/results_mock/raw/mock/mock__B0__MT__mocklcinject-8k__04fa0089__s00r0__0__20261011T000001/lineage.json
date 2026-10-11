@@ -1,9 +1,9 @@
 {
   "clock": "virtual",
   "clock_offset_ns": 0,
-  "code_commit": "ca8671aeeac2aad094037aff012a1f93b5a111b4-dirty",
+  "code_commit": "10172c099e1829f88c55b8328744c3157d3f02eb-dirty",
   "code_dirty": true,
-  "config_hash": "0fe5e5ffd70e60c5a870be6a33a22fe657a2b3f36a641ddd030099470be0e89c",
+  "config_hash": "04fa00898430b927308e8895bbd0906cabc22167ab63513252cad515fa9bd2d8",
   "data_manifest_sha": "7893db7b626294a5",
   "engine_version": "mock",
   "env_hash": {
@@ -11,7 +11,7 @@
     "pip_freeze_sha": "1b6bcc53b2d01c11"
   },
   "exp_id": "mock",
-  "finished_unix_ns": 1791692159477512264,
+  "finished_unix_ns": 1791701691873815959,
   "gpu_count": 0,
   "gpu_driver": null,
   "gpu_name": "cpu",
@@ -25,15 +25,15 @@
   "producer": "mock",
   "python": "3.11.17",
   "record_cache_keys": [],
-  "run_id": "mock__B0__MT__mocklcinject-8k__0fe5e5ff__s00r0__0__20261011T000000",
+  "run_id": "mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001",
   "schema_version": 1,
   "seed": 0,
   "shim_active": false,
   "slurm_array_job_id": null,
   "slurm_array_task_id": null,
   "slurm_job_id": null,
-  "started_monotonic_ns": 3152343739390,
-  "started_unix_ns": 1791692159089950505,
+  "started_monotonic_ns": 5083015905042,
+  "started_unix_ns": 1791701691472793509,
   "threshold_ids": [
     "F5"
   ],

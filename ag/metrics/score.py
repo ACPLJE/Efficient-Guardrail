@@ -58,13 +58,24 @@ def selector_variants(exp: Mapping[str, Any]) -> list[tuple[str, dict, SelectorC
     return out
 
 
+def target_layers(job: Mapping[str, Any]) -> tuple[int | None, tuple[str, ...] | None]:
+    """(n_layers, layer_attn_kind) of the job's target, so named layer specs resolve over the target's
+    full-attention layers (SPEC 4.5, D-031, D-037). Real targets read configs/targets/*.yaml (S2)."""
+    flags = (job.get("system") or {}).get("flags") or {}
+    if flags.get("engine", "mock") == "mock":
+        from ag.targets.mock import mock_target_layers
+        return mock_target_layers((flags.get("mock") or {}).get("target") or {})
+    return None, None
+
+
 def _order(scores: np.ndarray) -> np.ndarray:
     finite = np.flatnonzero(np.isfinite(scores))
     return finite[np.lexsort((finite, -scores[finite]))]
 
 
 def hits_for_record(rec: LedgerRecord, req: Request, payload: Sequence[int], per_site: Sequence[Sequence[int]],
-                    chunking: ChunkingConfig, variants) -> list[dict]:
+                    chunking: ChunkingConfig, variants, *, n_target_layers: int | None = None,
+                    attn_kind: Sequence[str] | None = None) -> list[dict]:
     el = wm.eligible_windows(rec.block_untrusted)
     n_el = int(el.sum())
     P = set(payload)
@@ -74,11 +85,12 @@ def hits_for_record(rec: LedgerRecord, req: Request, payload: Sequence[int], per
     for vid, spec, cfg, ks in variants:
         if cfg.head_weighting != "uniform":
             continue        # aggregate B is S2 work
-        base = {"request_id": req.request_id, "variant_id": vid, "variant": spec, "n_eligible": n_el,
-                "n_payload": len(P)}
+        base = {"request_id": req.request_id, "source": req.source, "variant_id": vid, "variant": spec,
+                "n_eligible": n_el, "n_payload": len(P)}
 
         def ranked(ch):
-            s = wm.window_scores_from_blocks(chunk_block_mass(rec, ch, cfg), el)
+            s = wm.window_scores_from_blocks(
+                chunk_block_mass(rec, ch, cfg, n_target_layers=n_target_layers, attn_kind=attn_kind), el)
             order = [int(w) for w in _order(s)]
             pos = {w: i + 1 for i, w in enumerate(order)}
             rank = min((pos[w] for w in P if w in pos), default=None)
@@ -158,6 +170,7 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
     # ---- hits.jsonl from this run's Records (B0 runs record; defended runs reuse the parent's)
     chunking = ChunkingConfig(**dict(job.get("chunking") or {}))
     variants = selector_variants(job)
+    n_layers, attn_kind = target_layers(job)
     hit_rows: list[dict] = []
     if (run_dir / "records" / "index.jsonl").exists():
         store = RecordStore(run_dir / "records")
@@ -166,7 +179,8 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
             if row is None or not row.get("payload_windows"):
                 continue
             hit_rows += hits_for_record(rec, reqs[rec.request_id], row["payload_windows"],
-                                        row.get("payload_windows_per_site") or (), chunking, variants)
+                                        row.get("payload_windows_per_site") or (), chunking, variants,
+                                        n_target_layers=n_layers, attn_kind=attn_kind)
         write_rows(run_dir / "hits.jsonl", run_id, hit_rows)
     report_hits = hit_rows if hit_rows or parent_dir is None else read_rows(parent_dir / "hits.jsonl")
     default_vid = next((vid for vid, spec, _, _ in variants if spec["selector"]["layers"] == DEFAULT_LAYERS
@@ -181,13 +195,15 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
             continue
         s = succ.get(rid, {})
         b0 = b0_succ.get(rid, {})
-        mine = [h for h in report_hits if h["request_id"] == rid and h["variant_id"] == default_vid
-                and h["site_rule"] == "single"]
+        mine = [h for h in report_hits if h["request_id"] == rid and h["variant_id"] == default_vid]
         hit: dict[str, dict[int, bool]] = {}
         rank: dict[str, int | None] = {}
         for h in mine:
-            hit.setdefault(h["chunk_def"], {})[int(h["k"])] = bool(h["hit"])
-            rank[h["chunk_def"]] = h["payload_rank"]
+            single = h["site_rule"] == "single"
+            key = h["chunk_def"] if single else f'{h["chunk_def"]}_{h["site_rule"]}'      # union_any, union_all
+            hit.setdefault(key, {})[int(h["k"])] = bool(h["hit"])
+            if single:      # SPEC 2.4: chunk_def or "serving_best" (best rank over serving chunks)
+                rank["serving_best" if h["chunk_def"] == "union" else h["chunk_def"]] = h["payload_rank"]
         sel = {int(c): tuple(v) for c, v in (row.get("selected") or {}).items()}
         P = set(row.get("payload_windows") or ())
         hit_live = {k_live: bool(P & set().union(*map(set, sel.values())))} if (k_live and P and sel) else {}
@@ -198,7 +214,8 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
             tau=tau, system_id=job["system_id"], target_id=job["target"], judge_id=judge_id,
             labels={"inj": req.is_attack, "harm": False}, is_attack=req.is_attack,
             attack_success=s.get("attack_success"), attack_success_b0=b0.get("attack_success"),
-            s_source_run_id=s_src, utility=s.get("utility"), blocked=bool(row.get("blocked")),
+            s_source_run_id=s_src, utility=False if row.get("blocked") else s.get("utility"),
+            blocked=bool(row.get("blocked")),
             block_reason=row.get("block_reason"), block_reasons=reasons,
             false_block=bool(row.get("blocked")) and not req.is_attack, error_kind=row.get("error_kind"),
             judged_windows=int(row.get("judged_windows", 0)),
@@ -212,7 +229,7 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
     write_rows(run_dir / "outcomes.jsonl", run_id, outcomes)
 
     summary = summarize(outcomes, report_hits, per, default_vid=default_vid,
-                        ks=variants[0][3] if variants else [8], seed=n_boot_seed)
+                        ks=variants[0][3] if variants else [8], seed=n_boot_seed, exposed_applicable=not is_b0)
     summary["_meta"] = {"run_id": run_id, "s_source_run_id": s_src, "default_variant_id": default_vid,
                         "variants": {vid: spec for vid, spec, _, _ in variants}, "n_units": len(outcomes),
                         "n_S": sum(1 for o in outcomes if o["attack_success_b0"])}
@@ -221,7 +238,9 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
 
 
 def summarize(outcomes: Sequence[Mapping], hit_rows: Sequence[Mapping], per: Mapping[str, list], *,
-              default_vid: str | None, ks: Sequence[int], seed: int = 0) -> dict[str, Any]:
+              default_vid: str | None, ks: Sequence[int], seed: int = 0,
+              exposed_applicable: bool = True) -> dict[str, Any]:
+    """exposed_applicable=False for B0 (no gate): exposed tokens are "not applicable" (SPEC 6.2)."""
     out: dict[str, Any] = {
         str(M.ASR): q.asr(outcomes, seed=seed), str(M.FPR_INJ): q.fpr_inj(outcomes, seed=seed),
         str(M.FPR_ALL): q.fpr_all(outcomes, seed=seed), str(M.UTILITY): q.utility(outcomes, seed=seed),
@@ -242,6 +261,12 @@ def summarize(outcomes: Sequence[Mapping], hit_rows: Sequence[Mapping], per: Map
                                                        variant_id=default_vid, seed=seed)
                 rb = q.random_baseline(hit_rows, chunk_def=cd, k=k, units=S, variant_id=default_vid)
                 out[random_hit_key(k, cd)] = {"value": rb, "n": len(S), "unit": "ratio"}
+        if any(h["site_rule"] != "single" for h in hit_rows):          # scattered payloads (E5.2)
+            for k in ks:
+                for rule in ("any", "all"):
+                    out[hit_key(k, "union", "S", rule)] = q.hit_rate(hit_rows, chunk_def="union", k=k, units=S,
+                                                                    site_rule=rule, variant_id=default_vid,
+                                                                    seed=seed)
     lat: dict[str, list[float]] = {str(m): [] for m in (M.TTFT_GEN, M.PREFILL_TIME, M.TPOT_GEN, M.TTFV,
                                                         M.TTFV_ENGINE, M.RELEASE_LAG, M.BLOCK_LAG, M.TPOT_VIS,
                                                         M.ITL_VIS, M.EXPOSED_TOKENS, M.GATE_DELAY, M.E2E_VIS,
@@ -264,13 +289,15 @@ def summarize(outcomes: Sequence[Mapping], hit_rows: Sequence[Mapping], per: Map
         lat[str(M.BLOCK_LAG)] += pr.block_lags(rt)
         lat[str(M.TPOT_VIS)].append(pr.tpot_vis(rt))
         lat[str(M.ITL_VIS)] += pr.itl_vis_flat(rt)
-        lat[str(M.EXPOSED_TOKENS)].append(pr.exposed_tokens(rt))
+        if exposed_applicable:
+            lat[str(M.EXPOSED_TOKENS)].append(pr.exposed_tokens(rt))
         lat[str(M.GATE_DELAY)] += pr.gate_delays(rt)
         lat[str(M.E2E_VIS)].append(pr.e2e_vis(rt))
     for name, vals in lat.items():
         vals = [v for v in vals if v is not None]
         unit = "tokens" if name == str(M.EXPOSED_TOKENS) else "ns"
+        na = name == str(M.EXPOSED_TOKENS) and not exposed_applicable
         for p, v in pr.percentiles(vals).items():
-            out[pct_key(name, p)] = {"value": v, "n": len(vals), "unit": unit}
+            out[pct_key(name, p)] = {"value": v, "n": len(vals), "unit": unit, **({"not_applicable": True} if na else {})}
     out["latency_excluded_requests"] = {"value": excluded, "n": len(per), "unit": "requests"}
     return out
