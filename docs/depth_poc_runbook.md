@@ -127,7 +127,7 @@ source /home/212aig08/ag_venv/ag311/bin/activate        # D-001
 pip install -r requirements.txt matplotlib torch transformers   # 그림이 필요 없으면 matplotlib 생략
 cp env/ag.env.example env/ag.env                          # sbatch가 slurm/ag_common.sh로 읽는다
 python depthctl.py smoke                                  # 작은 무작위 모델로 전 과정 점검 (CPU, 이 컨테이너에서 26초 [측정])
-python -m pytest -q tests/test_agdepth.py                 # 36개
+python -m pytest -q tests/test_agdepth.py                 # 37개
 ```
 
 smoke는 배관만 확인한다. 보고서 맨 위에도 그렇게 적힌다. 2×10⁻⁴는 smoke 규모로는 잴 수 없어서 판정이 INCONCLUSIVE로 나오는 것이 정상이다.
@@ -136,9 +136,9 @@ smoke는 배관만 확인한다. 보고서 맨 위에도 그렇게 적힌다. 2�
 
 | 명령 | 결과 |
 | --- | --- |
-| `pytest tests/test_agdepth.py` | 36 passed, 약 102초 |
-| `python -m pytest tests -x -q` | 335 passed, 2 skipped |
-| `pytest $(cat tests/manifests/cpu.txt)` | 335 passed, 1 skipped |
+| `pytest tests/test_agdepth.py` | 37 passed, 약 93초 |
+| `python -m pytest tests -x -q` | 336 passed, 2 skipped |
+| `pytest $(cat tests/manifests/cpu.txt)` | 336 passed, 1 skipped |
 | `python tools/check_test_classification.py` | rc 0 |
 
 ### 3.1 다운로드 (로그인 노드만)
