@@ -64,6 +64,9 @@ def _check_request(rid: str, evs: list[Event], flags: Mapping[str, Any]) -> dict
                 fail("no_release_before_verdict", f"chunk {j} released despite unsafe result in {jid}")
         if g.cached_verdict_ns is not None and g.cached_verdict_ns > r.t_ns:
             fail("no_release_before_verdict", f"chunk {j} released before its cached verdict time")
+        if g.payload.get("cached_unsafe_windows"):      # cache hits carry no JOB_DONE (SPEC 3.2 v1.3)
+            fail("no_release_before_verdict",
+                 f"chunk {j} released despite unsafe cached verdicts {list(g.payload['cached_unsafe_windows'])}")
 
     # one gate decision per chunk (released xor blocked, at most once)
     decisions: dict[int, int] = {}
@@ -126,8 +129,12 @@ def _check_request(rid: str, evs: list[Event], flags: Mapping[str, Any]) -> dict
 
     # 9. every chunk is gated when the system judges
     if flags.get("uses_judge", False) and flags.get("inj_path", "on") != "off":
+        oracle = (flags.get("selector") or {}).get("rule") == "oracle"
         for j, g in gen.items():
-            exempt = flags.get("block_before_generation", False) and j >= 1
+            # exempt: chunks >= 1 under block_before_generation (chunk 0's job covers the request) and an
+            # oracle selection that is empty (P(r) = {} on a benign request: nothing to judge)
+            exempt = (flags.get("block_before_generation", False) and j >= 1) \
+                or (oracle and not g.payload.get("selected"))
             if not exempt and not g.required_jobs and g.cached_verdict_ns is None:
                 fail("chunk_without_verdict", f"chunk {j} has no required_jobs and no cached verdict")
 

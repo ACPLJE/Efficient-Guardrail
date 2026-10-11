@@ -97,6 +97,8 @@ def test_resume_repairs_a_partial_record_index_row(tmp_path):
     assert _ok(d)
     assert len((d / "outcomes.jsonl").read_text().splitlines()) == 8
     assert (d / "hits.jsonl").exists()
+    idx_rows = [json.loads(l) for l in (d / "records" / "index.jsonl").read_text().splitlines()]
+    assert len(idx_rows) == 8 and last in {r["request_id"] for r in idx_rows}    # not glued onto the half line
 
 
 def test_resume_reruns_request_without_outcome_row(tmp_path):

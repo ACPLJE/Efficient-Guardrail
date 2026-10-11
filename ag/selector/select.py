@@ -147,10 +147,11 @@ def select(scores: np.ndarray, cfg: SelectorConfig, *, oracle: Sequence[int] | N
         return tuple(sorted(int(w) for w in pick))
     if cfg.rule == "mass_threshold":
         s = np.clip(np.asarray(scores, dtype=np.float64)[order], 0.0, None)
-        total = s.sum()
+        cum = np.cumsum(s)
+        total = float(cum[-1]) if len(cum) else 0.0      # same sequential sum: a full prefix is exactly 1.0
         if total <= 0:
             return tuple(int(w) for w in order[:1])
-        n = int(np.searchsorted(np.cumsum(s) / total, float(cfg.mass_tau), side="left")) + 1
+        n = int(np.searchsorted(cum / total, float(cfg.mass_tau), side="left")) + 1
         return tuple(int(w) for w in order[: min(n, len(order))])
     raise ValueError(f"unknown selector rule {cfg.rule!r}")
 

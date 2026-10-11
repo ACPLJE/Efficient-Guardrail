@@ -69,6 +69,13 @@ def test_summary_has_per_site_hits():
     assert s["hit@8[union_any]"]["value"] == 1.0 and s["hit@8[union_all]"]["value"] == 0.0
 
 
+def test_hit_rate_denominator_is_the_unit_set():
+    rows = [{"request_id": f"r{i}", "variant_id": "v", "chunk_def": "union", "site_rule": "single", "k": 8,
+             "hit": True} for i in range(3)]
+    out = hit_rate(rows, chunk_def="union", k=8, units={"r0", "r1", "r2", "r3"})     # r3 has no hit row
+    assert (out["num"], out["den"], out["n_missing_rows"]) == (3, 4, 1)
+
+
 def test_hit_rate_and_random_baseline():
     rows = [{"request_id": f"r{i}", "variant_id": "v", "chunk_def": "union", "site_rule": "single", "k": 8,
              "hit": i < 3, "n_eligible": 255, "n_payload": 1, "m": 8, "source": "s"} for i in range(4)]

@@ -1,17 +1,17 @@
 {
   "clock": "virtual",
   "clock_offset_ns": 0,
-  "code_commit": "10172c099e1829f88c55b8328744c3157d3f02eb-dirty",
+  "code_commit": "454169cee8b1295c5f1a82cc6da8e3f04cb616f6-dirty",
   "code_dirty": true,
   "config_hash": "04fa00898430b927308e8895bbd0906cabc22167ab63513252cad515fa9bd2d8",
   "data_manifest_sha": "7893db7b626294a5",
   "engine_version": "mock",
   "env_hash": {
     "env_vars_sha": "6f3b12c5c8e4ee1b",
-    "pip_freeze_sha": "1b6bcc53b2d01c11"
+    "pip_freeze_sha": "56b31fcf185fb279"
   },
   "exp_id": "mock",
-  "finished_unix_ns": 1791701691873815959,
+  "finished_unix_ns": 1791721613248268963,
   "gpu_count": 0,
   "gpu_driver": null,
   "gpu_name": "cpu",
@@ -32,8 +32,8 @@
   "slurm_array_job_id": null,
   "slurm_array_task_id": null,
   "slurm_job_id": null,
-  "started_monotonic_ns": 5083015905042,
-  "started_unix_ns": 1791701691472793509,
+  "started_monotonic_ns": 12684454226876,
+  "started_unix_ns": 1791721612729822894,
   "threshold_ids": [
     "F5"
   ],

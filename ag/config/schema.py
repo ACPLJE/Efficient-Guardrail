@@ -73,6 +73,42 @@ def del_dotted(d: dict[str, Any], key: str) -> None:
         cur.pop(parts[-1], None)
 
 
+SPLITS = ("calib", "test", "pilot")
+LAYER_SPECS = ("all", "upper_half", "tracked8", "last")
+PRECISIONS = ("fp16", "fp32")
+SELECTOR_RULES = ("topk", "mass_threshold", "all", "oracle", "random")
+CLOCKS = ("monotonic", "virtual")
+
+
+def _each(v) -> list:
+    return list(v) if isinstance(v, list) else [v]
+
+
+def validate_exp_values(d: Mapping[str, Any], where: Any = "") -> None:
+    """Value checks that would otherwise fail only after generation (SPEC 2.1, 4.5, 5.2, 8.1)."""
+    split = get_dotted(d, "data.split", "test")
+    if split not in SPLITS:
+        raise ConfigError(f"{where}: data.split must be one of {SPLITS}, got {split!r}")
+    rec = d.get("record") or {}
+    layers = rec.get("layers", "all")
+    if not ((isinstance(layers, list) and all(isinstance(x, int) for x in layers)) or layers in LAYER_SPECS):
+        raise ConfigError(f"{where}: record.layers must be {LAYER_SPECS} or a list of ints, got {layers!r}")
+    if rec.get("precision", "fp16") not in PRECISIONS:
+        raise ConfigError(f"{where}: record.precision must be one of {PRECISIONS}")
+    sel = d.get("selector") or {}
+    for rule in _each(sel.get("rule", "topk")):
+        if rule not in SELECTOR_RULES:
+            raise ConfigError(f"{where}: selector.rule {rule!r} not in {SELECTOR_RULES}")
+    for ls in _each(sel.get("layers", "tracked8")):
+        if not (isinstance(ls, list) or ls in LAYER_SPECS):
+            raise ConfigError(f"{where}: selector.layers {ls!r} not in {LAYER_SPECS} or a list of ints")
+    if d.get("clock", "monotonic") not in CLOCKS:
+        raise ConfigError(f"{where}: clock must be one of {CLOCKS}")
+    for inc in (d.get("sweep") or {}).get("include") or []:
+        if not isinstance(inc, Mapping):
+            raise ConfigError(f"{where}: sweep.include entries must be mappings of dotted keys, got {inc!r}")
+
+
 def load_exp(path: str | Path) -> dict[str, Any]:
     d = load_yaml(path)
     missing = [k for k in EXP_REQUIRED if k not in d]
@@ -84,6 +120,7 @@ def load_exp(path: str | Path) -> dict[str, Any]:
     for k in ("systems", "targets"):
         if not isinstance(d[k], list) or not d[k]:
             raise ConfigError(f"{path}: {k} must be a non-empty list")
+    validate_exp_values(d, path)
     return d
 
 

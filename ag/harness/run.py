@@ -14,7 +14,10 @@ from pathlib import Path
 from ag.config.schema import load_exp
 from ag.harness.lineage import EXIT_LINEAGE_MISMATCH, LineageMismatch, fail_on_mismatch
 from ag.harness.runner import run_job
-from ag.sweep.expand import JobsFileMismatch, expand, fresh_ts, write_jobs
+from ag.metrics.score import check_record_covers_selector
+from ag.sweep.expand import JobsFileMismatch, expand, fairness_mismatches, fresh_ts, write_jobs
+
+EXIT_FAIRNESS = 3
 
 
 def default_out() -> Path:
@@ -35,6 +38,13 @@ def main(argv: list[str] | None = None) -> int:
     exp = load_exp(args.config)
     ts = args.ts or fresh_ts(out / "raw" / exp["exp_id"] / "jobs")
     jobs = expand(exp, ts=ts, clock=args.clock)
+    mism = fairness_mismatches(jobs, exp.get("fairness_exempt") or [])
+    if mism:                        # checks.fairness_knobs_equal (SPEC 8.3): compared before any run
+        print("checks.fairness_knobs_equal failed:\n  " + "\n  ".join(mism), file=sys.stderr)
+        return EXIT_FAIRNESS
+    for j in jobs:                  # Records must cover every offline selector variant (before any generation)
+        check_record_covers_selector(j.resolved)
+    fairness_detail = f"{len(jobs)} jobs compared at expand; exempt={list(exp.get('fairness_exempt') or [])}"
     try:                            # run_id is fixed once at expand time (SPEC 1.5)
         path = write_jobs(out, jobs, ts)
     except JobsFileMismatch as e:
@@ -46,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd = " ".join([sys.executable, "-m", "ag.harness.run"] + (argv if argv is not None else sys.argv[1:]))
     try:
         for job in jobs:
-            run_dir = run_job(job, out, cmd=cmd, limit=args.limit)
+            run_dir = run_job(job, out, cmd=cmd, limit=args.limit, fairness_detail=fairness_detail)
             print(f"run {job.run_id} -> {run_dir}")
     except LineageMismatch as e:
         fail_on_mismatch(e)

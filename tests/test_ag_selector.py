@@ -82,6 +82,12 @@ def test_select_rules():
     assert payload_rank(s, [4, 0]) == 3 and payload_rank(s, [1]) is None
 
 
+def test_mass_threshold_full_mass_is_minimal():
+    s = np.array([0.86, 0.66, 0.41, 0.23, 0.11, 0.06, 0.05, 0.01, 0.0])
+    assert len(select(s, SelectorConfig(rule="mass_threshold", mass_tau=1.0))) == 8    # the zero window is not added
+    assert len(select(s, SelectorConfig(rule="mass_threshold", mass_tau=0.5))) == 2
+
+
 def test_random_baseline_formula():
     assert random_hit_prob(255, 1, 8) == pytest.approx(8 / 255)        # build plan: N1 8/255 = 3.1 %
     assert random_hit_prob(10, 2, 9) == 1.0

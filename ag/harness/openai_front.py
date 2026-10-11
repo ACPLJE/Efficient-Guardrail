@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import threading
 import time
 import zlib
@@ -185,5 +186,10 @@ def make_server(front: OpenAIFront, host: str = "127.0.0.1", port: int = 0) -> T
                 err = {"error": {"message": str(exc), "type": "invalid_request_error"}}
                 self.wfile.write(f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode())
                 self.wfile.flush()
+            except OSError as exc:      # client went away mid-stream: let System.run finish so the request
+                logging.getLogger("ag.openai_front").warning(     # still ends with FINISHED (SPEC 3.4 #7)
+                    "client disconnected mid-stream from %s: %r", self.client_address, exc)
+                for _ in chunks:
+                    pass
 
     return ThreadingHTTPServer((host, port), Handler)

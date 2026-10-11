@@ -12,6 +12,78 @@ RUN_FILES = ("lineage.json", "resolved.yaml", "cmd.txt", "events.jsonl", "outcom
              "outcomes.jsonl", "summary.json", "checks.json")
 
 
+def _rescore_with_error(run_dir, rid):
+    from ag.metrics.score import score_outcomes
+    rs = rows(run_dir / "outcomes_run.jsonl")
+    for r in rs:
+        if r["request_id"] == rid:
+            r.update(error_kind="RuntimeError", generation=None)
+    (run_dir / "outcomes_run.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rs))
+    return score_outcomes(run_dir)
+
+
+def test_error_units_are_counted_and_left_out_of_s(tmp_path):
+    exp = small_exp(tmp_path)
+    out = tmp_path / "out"
+    assert run_main(["--config", str(exp), "--out", str(out)]) == 0
+    runs = run_dirs(out)
+    s_before = load_json(runs["AG"] / "summary.json")
+    victim = next(o["unit_id"] for o in rows(runs["AG"] / "outcomes.jsonl") if o["attack_success_b0"])
+    s = _rescore_with_error(runs["AG"], victim)
+    assert s["error_units"]["value"] == 1 and s["error_units"]["attack"] == 1
+    assert s["_meta"]["n_error"] == 1 and s["_meta"]["n_S"] == s_before["_meta"]["n_S"] - 1
+    assert s["hit@8[union]"]["den"] == s["_meta"]["n_S"] and s["asr"]["den"] == s_before["asr"]["den"] - 1
+
+
+def test_missing_parent_is_reported_not_silent(tmp_path):
+    exp = small_exp(tmp_path)
+    out = tmp_path / "out"
+    assert run_main(["--config", str(exp), "--out", str(out), "--ts", "20261011T000005"]) == 0
+    runs = run_dirs(out)
+    (runs["B0"] / "success.jsonl").unlink()                        # parent not scored
+    (runs["AG"] / "lineage.json").write_text((runs["AG"] / "lineage.json").read_text())
+    from ag.metrics.score import score_outcomes
+    s = score_outcomes(runs["AG"])
+    assert s["_meta"]["s_source_run_id"] is None and "hit@8[union]" not in s
+
+
+def test_abstract_numbers_rejects_a_missing_metric(tmp_path):
+    exp = small_exp(tmp_path, systems=["mock_b0"], selector={"k": [1, 2, 4, 16]})
+    out = tmp_path / "out"
+    assert run_main(["--config", str(exp), "--out", str(out)]) == 0
+    b0 = run_dirs(out)["B0"]
+    r = subprocess.run([sys.executable, str(ROOT / "plots" / "abstract_numbers.py"), "--out", str(out),
+                        "--source", f"abs3={b0.name}", "--allow-mock"], capture_output=True, text=True)
+    assert r.returncode == 1 and "hit@8[union]" in r.stderr
+    assert not (out / "numbers.json").exists()
+
+
+def test_index_append_is_safe_across_processes(tmp_path):
+    import multiprocessing as mp
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_append_many, args=(str(tmp_path), p, 40)) for p in range(4)]
+    [p.start() for p in procs]
+    [p.join(60) for p in procs]
+    assert all(p.exitcode == 0 for p in procs)
+    idx = [json.loads(l) for l in (tmp_path / "raw" / "index.jsonl").read_text().splitlines()]
+    assert len(idx) == 160 and len({r["run_id"] for r in idx}) == 160
+
+
+def _append_many(root, p, n):
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT))
+    from pathlib import Path
+    from ag.harness.runner import _append_index
+    from ag.sweep.expand import Job
+    root = Path(root)
+    for i in range(n):
+        rid = f"E__S__T__d__abcdef01__s00r0__{p}__{i:04d}"
+        d = root / "raw" / "E" / rid
+        d.mkdir(parents=True, exist_ok=True)
+        _append_index(root, Job(rid, "E", "S", "T", "d", "h", 0, 1, 0, p, {}), d)
+        _append_index(root, Job(rid, "E", "S", "T", "d", "h", 0, 1, 0, p, {}), d)      # second call is a no-op
+
+
 def test_end_to_end_under_60s(tmp_path):
     t0 = time.monotonic()
     exp = small_exp(tmp_path, data={"length_classes": ["8k"]})

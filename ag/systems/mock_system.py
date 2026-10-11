@@ -19,7 +19,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from ag.data.render import window_text
-from ag.data.types import ChunkInfo, ChunkingConfig, Generation, RenderedPrompt, Request, Verdict, is_unsafe
+from ag.data.types import (ChunkInfo, ChunkingConfig, Generation, RenderedPrompt, Request, Verdict, WindowSpec,
+                           is_unsafe)
 from ag.harness.context import RunContext
 from ag.harness.events import DeadlineKind, Event, EventType as E, JobKind
 from ag.judges.base import JudgeInput, VerdictCache, cache_key
@@ -41,6 +42,7 @@ class _Timeline:
 
     def __post_init__(self) -> None:
         self.items: list[tuple[int, int, Event]] = []
+        self.n_jobs = 0          # per-request job counter (job_id = <request_id>#<kind>#<seq>, SPEC 1.5)
 
     def add(self, type_: E, t_ns: int, **kw) -> int:
         self.items.append((t_ns, len(self.items),
@@ -103,7 +105,13 @@ class MockSystem(System):
             op = exp.get("operating_point", "F5")
             self.threshold_id = op
             self.tau = float(f["thresholds"][self.judge.judge_id][op])
-            self.window_spec = (f.get("judge_windows") or ["128x2"])[0]
+            # the mock judges the target's own grid (split_tokens x 2 blocks); another spec would need a
+            # judge with a native window, so a mismatch is an error rather than a relabel
+            specs = list(f.get("judge_windows") or [f"{self.target.split_tokens}x2"])
+            if len(specs) != 1 or WindowSpec.parse(specs[0]) != WindowSpec(self.target.split_tokens, 2):
+                raise ValueError(f"mock judges the target's {self.target.split_tokens}x2 grid; "
+                                 f"judge_windows={specs} is not supported")
+            self.window_spec = specs[0]
             self.cache = VerdictCache(f.get("verdict_cache", "per_request"))
             self.overlap = bool(f.get("overlap", True))
             self.rbv = bool(f.get("release_before_verdict", False))
@@ -203,8 +211,8 @@ class MockSystem(System):
         verdicts = list(cached)
         job_id, done = None, None
         if miss:
-            self._job_seq += 1
-            job_id = f"{req.request_id}#{JobKind.INJ_JUDGE}#{self._job_seq}"
+            tl.n_jobs += 1
+            job_id = f"{req.request_id}#{JobKind.INJ_JUDGE}#{tl.n_jobs}"
             batch = [x for x, _ in miss]
             start = max(t_submit, pool_free)
             done = start + self.judge.latency_ns(batch)
@@ -212,7 +220,7 @@ class MockSystem(System):
             new = [Verdict(self.judge.judge_id, req.request_id, chunk_id, x.window_id, self.window_spec, s,
                            self.tau, self.threshold_id, is_unsafe(s, self.tau), done, done - start)
                    for x, s in zip(batch, scores)]
-            for (x, key), v in zip(miss, new):
+            for (_x, key), v in zip(miss, new):
                 self.cache.put(req.request_id, key, dataclasses.replace(v, cached=True))
             common = dict(job_id=job_id, job_kind=JobKind.INJ_JUDGE, chunk_id=chunk_id,
                           window_ids=tuple(x.window_id for x in batch), **att)
@@ -225,7 +233,6 @@ class MockSystem(System):
         return job_id, done, cached_ns, verdicts, pool_free
 
     def _plan_ag(self, req, rp, tl, t0, n_new, att) -> list[Event]:
-        self._job_seq = 0
         out = self.target.generate(rp, n_new, record=self.live_spec)
         rec = out.record
         T = len(out.output_ids)

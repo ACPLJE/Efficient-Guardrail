@@ -20,6 +20,7 @@ class M(StrEnum):
     JUDGED_WINDOWS_UNCACHED = "judged_windows_uncached"
     JUDGE_CALLS = "judge_calls"
     DEADLINE_MISS = "deadline_miss_rate"
+    ERROR_UNITS = "error_units"
     # latency (SPEC 6.2)
     TTFT_GEN = "ttft_gen"
     PREFILL_TIME = "prefill_time"

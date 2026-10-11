@@ -71,8 +71,28 @@ def make_run_id(exp_id: str, system_id: str, target: str, dtag: str, chash: str,
     return "__".join(parts)
 
 
+def _make_job(exp: Mapping[str, Any], sysd: Mapping[str, Any], target: str, seed: int, rep: int, shard: int,
+              n_shards: int, axes: Mapping[str, Any], *, ts: str, clock: str | None) -> Job:
+    r = copy.deepcopy(dict(exp))
+    for a, v in axes.items():
+        set_dotted(r, a, [v] if isinstance(get_dotted(exp, a), list) and not isinstance(v, list) else v)
+    r.pop("systems", None)
+    r.pop("targets", None)
+    r.pop("seeds", None)
+    r.pop("repeats", None)          # the count; the job keeps its own repeat index (SPEC 8.1)
+    r.update(system_id=sysd["system_id"], system=sysd, target=target, seed=seed, repeat=rep, shard=shard,
+             n_shards=n_shards, clock=clock or exp.get("clock", "monotonic"))
+    chash = config_hash(r)
+    dtag = data_tag(r)
+    rid = make_run_id(exp["exp_id"], sysd["system_id"], target, dtag, chash, shard, rep, seed, ts)
+    return Job(rid, exp["exp_id"], sysd["system_id"], target, dtag, chash, shard, n_shards, rep, seed, r,
+               axes=dict(axes))
+
+
 def expand(exp: Mapping[str, Any], *, systems_dir: str | Path | None = None, ts: str | None = None,
            clock: str | None = None) -> list[Job]:
+    """Jobs of an experiment: the product of the implicit axes (systems, targets, seeds, repeats, shards)
+    and sweep.job_axes, plus one extra combination per sweep.include entry (SPEC 8.1)."""
     ts = ts or time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     sweep = exp.get("sweep") or {}
     job_axes = [a for a in (sweep.get("job_axes") or []) if a not in ("systems", "targets")]
@@ -87,22 +107,70 @@ def expand(exp: Mapping[str, Any], *, systems_dir: str | Path | None = None, ts:
     jobs: list[Job] = []
     for sys_name, target, seed, rep, shard, combo in itertools.product(
             exp["systems"], exp["targets"], seeds, repeats, range(n_shards), itertools.product(*axis_vals)):
-        r = copy.deepcopy(dict(exp))
-        for a, v in zip(job_axes, combo):
-            set_dotted(r, a, [v] if isinstance(get_dotted(exp, a), list) else v)
-        sysd = systems[sys_name]
-        r.pop("systems", None)
-        r.pop("targets", None)
-        r.pop("seeds", None)
-        r.pop("repeats", None)          # the count; the job keeps its own repeat index (SPEC 8.1)
-        r.update(system_id=sysd["system_id"], system=sysd, target=target, seed=seed, repeat=rep, shard=shard,
-                 n_shards=n_shards, clock=clock or exp.get("clock", "monotonic"))
-        chash = config_hash(r)
-        dtag = data_tag(r)
-        rid = make_run_id(exp["exp_id"], sysd["system_id"], target, dtag, chash, shard, rep, seed, ts)
-        jobs.append(Job(rid, exp["exp_id"], sysd["system_id"], target, dtag, chash, shard, n_shards, rep, seed, r,
-                        axes=dict(zip(job_axes, combo))))
+        jobs.append(_make_job(exp, systems[sys_name], target, seed, rep, shard, n_shards, dict(zip(job_axes, combo)),
+                              ts=ts, clock=clock))
+    for inc in sweep.get("include") or []:          # combinations outside the product
+        inc = dict(inc)
+        inc_systems = inc.pop("systems", exp["systems"])
+        inc_targets = inc.pop("targets", exp["targets"])
+        inc_systems = inc_systems if isinstance(inc_systems, list) else [inc_systems]
+        inc_targets = inc_targets if isinstance(inc_targets, list) else [inc_targets]
+        for name in inc_systems:
+            systems.setdefault(name, load_system(name, systems_dir))
+        for sys_name, target, seed, rep, shard in itertools.product(inc_systems, inc_targets, seeds, repeats,
+                                                                     range(n_shards)):
+            jobs.append(_make_job(exp, systems[sys_name], target, seed, rep, shard, n_shards, inc, ts=ts, clock=clock))
+    if len({j.run_id for j in jobs}) != len(jobs):
+        raise ValueError("sweep.include repeats a combination of the product (duplicate run_id)")
     return _link_parents(jobs)
+
+
+# fairness knobs that every system of one experiment must share (SPEC 8.3)
+FAIR_KNOBS = ("max_new_tokens", "temperature", "ignore_eos", "dtype", "kv_capacity_tokens", "max_running_requests",
+              "chunked_prefill_size", "attention_backend", "cuda_graph", "target_revision")
+
+
+def fairness_knobs(job: Job) -> dict[str, Any]:
+    """Effective fairness knobs of a job: the system flag when set, else the experiment's fairness value.
+    AG-family systems (gate != none) also carry their effective chunking."""
+    r = job.resolved
+    flags = r["system"]["flags"]
+    fair = dict(r.get("fairness") or {})
+    knobs: dict[str, Any] = {k: flags.get(k, fair.get(k)) for k in FAIR_KNOBS}
+    if flags.get("gate", "ag") != "none":
+        knobs["chunking"] = dict(flags.get("chunking") or r.get("chunking") or {})
+    return knobs
+
+
+def fairness_mismatches(jobs: Sequence[Job], exempt: Sequence[str] = ()) -> list[str]:
+    """checks.fairness_knobs_equal (SPEC 8.3): within one condition (target, data, seed, repeat, shard,
+    job axes) every system must share FAIR_KNOBS, and every AG-family system must use the experiment's
+    chunking (hit@k[union] and the offline files are computed with it). Keys in `exempt`
+    (exp.fairness_exempt) are experiment axes and are skipped. Returns one message per mismatch."""
+    groups: dict[tuple, list[Job]] = {}
+    for j in jobs:
+        groups.setdefault((j.target, j.data_tag, j.seed, j.repeat, j.shard, canonical_hash(j.axes)), []).append(j)
+    out: list[str] = []
+    for key, members in groups.items():
+        ref = members[0]
+        rk = fairness_knobs(ref)
+        for j in members[1:]:
+            jk = fairness_knobs(j)
+            for k in FAIR_KNOBS:
+                if k in exempt:
+                    continue
+                if rk.get(k) != jk.get(k):
+                    out.append(f"{j.system_id} vs {ref.system_id} ({key[0]}, {key[1]}, seed {key[2]}): "
+                               f"{k} {jk.get(k)!r} != {rk.get(k)!r}")
+        if "chunking" in exempt:
+            continue
+        for j in members:
+            k = fairness_knobs(j)
+            exp_chunking = dict(j.resolved.get("chunking") or {})
+            if "chunking" in k and k["chunking"] != exp_chunking:
+                out.append(f"{j.system_id} ({key[0]}, {key[1]}): system chunking {k['chunking']} != experiment "
+                           f"chunking {exp_chunking} (set chunking in the experiment file; hit@k[union] uses it)")
+    return out
 
 
 def _link_parents(jobs: Sequence[Job]) -> list[Job]:

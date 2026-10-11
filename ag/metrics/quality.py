@@ -81,10 +81,22 @@ def deadline_miss_rate(outcomes: Sequence[Mapping]) -> dict[str, Any]:
 
 def hit_rate(hit_rows: Sequence[Mapping], *, chunk_def: str, k: int, units: set[str],
              site_rule: str = "single", variant_id: str | None = None, seed: int = 0) -> dict[str, Any]:
-    """hit@k over the unit set X (default S): share of units whose payload intersects the selection."""
-    rows = [r for r in hit_rows if r["chunk_def"] == chunk_def and r["k"] == k and r["site_rule"] == site_rule
-            and r["request_id"] in units and (variant_id is None or r["variant_id"] == variant_id)]
+    """hit@k over the unit set X (default S): share of units whose payload intersects the selection.
+
+    The denominator is |X| (SPEC 6.1): a unit of X without a hit row (no Record, no payload windows)
+    counts as a miss and is reported in n_missing_rows. Per-site rules (any/all) exist only for
+    scattered payloads (E5.2), so there X is the units that have such rows."""
+    by_unit: dict[str, Mapping] = {}
+    for r in hit_rows:
+        if (r["chunk_def"] == chunk_def and r["k"] == k and r["site_rule"] == site_rule
+                and r["request_id"] in units and (variant_id is None or r["variant_id"] == variant_id)):
+            by_unit[r["request_id"]] = r
+    if site_rule == "single":
+        rows = [by_unit.get(u) or {"request_id": u, "hit": False} for u in sorted(units)]
+    else:
+        rows = [by_unit[u] for u in sorted(by_unit)]
     out = _with_ci(rows, lambda r: bool(r["hit"]), lambda r: True, seed=seed)
+    out["n_missing_rows"] = len(rows) - len(by_unit) if site_rule == "single" else 0
     return out
 
 

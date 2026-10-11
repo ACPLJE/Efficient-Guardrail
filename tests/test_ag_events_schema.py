@@ -44,6 +44,17 @@ def test_collector_rejects_foreign_run(tmp_path):
     col.close()
 
 
+def test_collector_refuses_emit_after_close(tmp_path):
+    import pytest
+    col = Collector("run", tmp_path / "e.jsonl")
+    col.emit(Event("run", "q", EventType.ARRIVED, 0, "virtual"))
+    col.close()
+    col.close()                                                    # idempotent
+    with pytest.raises(RuntimeError, match="closed"):
+        col.emit(Event("run", "q", EventType.ADMITTED, 1, "virtual"))
+    assert len(read_rows(tmp_path / "e.jsonl")) == 1
+
+
 def test_latest_attempt_only():
     evs = [Event("r", "q", EventType.ARRIVED, 0, "virtual", attempt=0),
            Event("r", "q", EventType.ARRIVED, 9, "virtual", attempt=1)]

@@ -18,7 +18,7 @@ from ag.data import window_map as wm
 from ag.data.manifest import load_requests
 from ag.data.success_judge import get_success_judge
 from ag.data.types import ChunkingConfig, Generation, LedgerRecord, Outcome, Request
-from ag.harness.events import EventType as E, by_request, event_from_row
+from ag.harness.events import by_request, event_from_row
 from ag.harness.writer import atomic_write_json, read_json, read_rows, write_rows
 from ag.lineage_util import canonical_hash
 from ag.metrics import per_request as pr
@@ -72,6 +72,30 @@ def target_layers(job: Mapping[str, Any]) -> tuple[int | None, tuple[str, ...] |
     return None, None
 
 
+def check_record_covers_selector(job: Mapping[str, Any]) -> None:
+    """Every offline selector variant must resolve to layers the Record will hold (a B0 run that records
+    tracked8 cannot be scored with upper_half). Raises ValueError before any generation."""
+    from ag.selector.select import record_layer_index
+    rec = job.get("record")
+    if not rec:
+        return
+    n_layers, attn_kind = target_layers(job)
+    if n_layers is None:
+        return
+    from ag.selector.layers import resolve_layers
+    recorded = resolve_layers(tuple(rec["layers"]) if isinstance(rec.get("layers"), list) else rec.get("layers", "all"),
+                              n_layers, attn_kind)
+    fake = LedgerRecord("config", "", "mock", 1, "", "fp16", "include", 0, 128, (), np.zeros(0, np.int32),
+                        np.zeros(0, np.int64), np.asarray(recorded, dtype=np.int16), np.zeros((0, len(recorded), 0)),
+                        np.zeros(0, np.uint8))
+    for _, spec, cfg, _ in selector_variants(job):
+        try:
+            record_layer_index(fake, cfg, n_target_layers=n_layers, attn_kind=attn_kind)
+        except ValueError as e:
+            raise ValueError(f"record.layers={rec.get('layers')!r} does not cover selector.layers="
+                             f"{spec['selector']['layers']!r}: {e}") from e
+
+
 def _order(scores: np.ndarray) -> np.ndarray:
     finite = np.flatnonzero(np.isfinite(scores))
     return finite[np.lexsort((finite, -scores[finite]))]
@@ -92,7 +116,7 @@ def hits_for_record(rec: LedgerRecord, req: Request, payload: Sequence[int], per
         base = {"request_id": req.request_id, "source": req.source, "variant_id": vid, "variant": spec,
                 "n_eligible": n_el, "n_payload": len(P)}
 
-        def ranked(ch):
+        def ranked(ch, cfg=cfg):
             s = wm.window_scores_from_blocks(
                 chunk_block_mass(rec, ch, cfg, n_target_layers=n_target_layers, attn_kind=attn_kind), el)
             order = [int(w) for w in _order(s)]
@@ -168,6 +192,10 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
     else:
         parents = lin.get("parent_run_ids") or []
         parent_dir = _run_dir_of(out_root, parents[0]) if parents else None
+        # S needs the parent's success verdicts; an unindexed or not-yet-scored parent gives no S (the runner
+        # records that as checks.s_source_available = false) rather than a silently empty one
+        if parent_dir is not None and not (parent_dir / "success.jsonl").exists():
+            parent_dir = None
         s_src = parents[0] if parent_dir else None
         b0_succ = _success_map(read_rows(parent_dir / "success.jsonl")) if parent_dir else {}
 
@@ -238,9 +266,12 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
     summary = summarize(outcomes, report_hits, per, default_vid=default_vid,
                         ks=sorted({int(h["k"]) for h in report_hits}) or (variants[0][3] if variants else [8]),
                         seed=n_boot_seed, exposed_applicable=not is_b0)
+    ok_units = [o for o in outcomes if o.get("error_kind") is None]
     summary["_meta"] = {"run_id": run_id, "s_source_run_id": s_src, "default_variant_id": default_vid,
                         "variants": specs, "n_units": len(outcomes),
-                        "n_S": sum(1 for o in outcomes if o["attack_success_b0"])}
+                        "n_A": sum(1 for o in ok_units if o["is_attack"]),
+                        "n_S": sum(1 for o in ok_units if o["is_attack"] and o["attack_success_b0"]),
+                        "n_error": len(outcomes) - len(ok_units)}
     atomic_write_json(run_dir / "summary.json", summary)
     return summary
 
@@ -255,6 +286,13 @@ def summarize(outcomes: Sequence[Mapping], hit_rows: Sequence[Mapping], per: Map
         str(M.UTILITY_ATTACK): q.utility(outcomes, attack=True, seed=seed),
         str(M.DEADLINE_MISS): q.deadline_miss_rate(outcomes),
     }
+    errs = [o for o in outcomes if o.get("error_kind") is not None]      # excluded from every denominator (SPEC 6.1)
+    by_kind: dict[str, int] = {}
+    for o in errs:
+        by_kind[str(o["error_kind"])] = by_kind.get(str(o["error_kind"]), 0) + 1
+    out[str(M.ERROR_UNITS)] = {"value": len(errs), "n": len(outcomes), "unit": "units", "by_kind": by_kind,
+                               "attack": sum(1 for o in errs if o["is_attack"]),
+                               "benign": sum(1 for o in errs if not o["is_attack"])}
     for m in (M.JUDGED_WINDOWS, M.JUDGED_WINDOWS_UNCACHED, M.JUDGE_CALLS):
         v = [o[str(m)] for o in outcomes if o.get("error_kind") is None]
         out[str(m)] = {"value": float(np.mean(v)) if v else None, "n": len(v), "unit": "windows"}

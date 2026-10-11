@@ -43,7 +43,10 @@ def main(argv: list[str] | None = None) -> int:
         d = C.run_dir_of(out_root, rid, exp="")
         lin = C.check_run(d, allow_mock=args.allow_mock)
         metric, unit = SOURCES[key]
-        m = read_json(d / "summary.json").get(metric) or {}
+        m = read_json(d / "summary.json").get(metric)
+        if not m or m.get("value") is None:
+            raise C.RunRejected(f"{rid}: summary.json has no {metric} value (abs3 needs selector.k with 8 and a "
+                                f"resolved S source); nothing written")
         nums[key].update(value=m.get("value"), unit=unit, ci=[m.get("ci_low"), m.get("ci_high")],
                          tag="mock" if C.is_mock(lin) else "측정", source_run_ids=[rid],
                          code_commit=lin.get("code_commit"), target_id=rid.split("__")[2])
@@ -58,4 +61,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except C.RunRejected as e:
         print(f"abstract_numbers: {e}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None

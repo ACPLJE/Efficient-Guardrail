@@ -70,6 +70,46 @@ def test_yaml_off_is_normalised(tmp_path):
         VerdictCache("bogus")
 
 
+def test_fairness_knobs_compared_before_any_run(tmp_path):
+    from _ag_util import system_file
+    from ag.harness.run import EXIT_FAIRNESS, main as run_main
+    from ag.sweep.expand import fairness_mismatches
+    assert fairness_mismatches(expand(load_exp(SKELETON), ts="t")) == []
+    p = system_file(tmp_path, "ag4", "mock_ag.yaml", "AG4", {"chunking": {"first": 4, "next": 16}})
+    exp = small_exp(tmp_path, systems=[str(p.parent / "mock_b0.yaml"), str(p)])
+    mism = fairness_mismatches(expand(load_exp(exp), ts="t"))
+    assert mism and "chunking" in mism[0]
+    assert run_main(["--config", str(exp), "--out", str(tmp_path / "out")]) == EXIT_FAIRNESS
+    assert not (tmp_path / "out" / "raw" / "mock").exists() or \
+        not list((tmp_path / "out" / "raw" / "mock").glob("*/events.jsonl"))
+    ok = small_exp(tmp_path, "ok.yaml", systems=[str(p.parent / "mock_b0.yaml"), str(p)],
+                   fairness_exempt=["chunking"])
+    assert fairness_mismatches(expand(load_exp(ok), ts="t"), ["chunking"]) == []
+    b = system_file(tmp_path, "b0x", "mock_b0.yaml", "B0X", {"max_new_tokens": 16})
+    exp2 = small_exp(tmp_path, "e2.yaml", systems=[str(b), str(p.parent / "mock_ag.yaml")])
+    assert any("max_new_tokens" in m for m in fairness_mismatches(expand(load_exp(exp2), ts="t")))
+
+
+def test_sweep_include_adds_jobs(tmp_path):
+    p = small_exp(tmp_path, sweep={"include": [{"targets": "MT", "data.length_classes": ["1k"], "data.n_attack": 2}]})
+    jobs = expand(load_exp(p), ts="t")
+    assert len(jobs) == 4                                          # 2 systems in the product + 2 included
+    inc = [j for j in jobs if j.resolved["data"]["length_classes"] == ["1k"]]
+    assert len(inc) == 2 and all(j.resolved["data"]["n_attack"] == 2 for j in inc)
+    ag_inc = next(j for j in inc if j.system_id == "AG")
+    b0_inc = next(j for j in inc if j.system_id == "B0")
+    assert ag_inc.parent_run_ids == (b0_inc.run_id,)               # included AG takes S from included B0
+
+
+@pytest.mark.parametrize("upd,match", [({"data": {"split": "train"}}, "data.split"),
+                                       ({"record": {"layers": "lower"}}, "record.layers"),
+                                       ({"selector": {"rule": "best"}}, "selector.rule"),
+                                       ({"clock": "wall"}, "clock")])
+def test_exp_values_validated_at_load(tmp_path, upd, match):
+    with pytest.raises(ConfigError, match=match):
+        load_exp(small_exp(tmp_path, **upd))
+
+
 def test_validation_errors(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(yaml.safe_dump({"exp_id": "x", "systems": ["mock_b0"], "targets": ["MT"], "typo_key": 1}))

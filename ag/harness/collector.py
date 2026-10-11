@@ -30,6 +30,7 @@ class Collector:
         self.errors: list[BaseException] = []
         self._drained = threading.Condition()
         self._pending = 0
+        self._closed = False
         self._thread = threading.Thread(target=self._loop, name="ag-collector", daemon=True)
         self._thread.start()
 
@@ -40,6 +41,8 @@ class Collector:
         if e.run_id != self.run_id:
             raise ValueError(f"event run_id {e.run_id!r} != collector run_id {self.run_id!r}")
         with self._drained:
+            if self._closed:
+                raise RuntimeError(f"collector for {self.run_id} is closed; event {e.type.name} for {e.request_id} dropped")
             self._pending += 1
         self._q.put(e)
 
@@ -72,6 +75,11 @@ class Collector:
             raise RuntimeError(f"collector failed: {self.errors[0]!r}") from self.errors[0]
 
     def close(self) -> None:
+        """Idempotent. Emits after close raise instead of silently vanishing."""
+        with self._drained:
+            if self._closed:
+                return
+            self._closed = True
         self.flush()
         self._q.put(_STOP)
         self._thread.join()

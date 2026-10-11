@@ -2,7 +2,9 @@
   "_meta": {
     "checks_ok": true,
     "default_variant_id": "11a747dc",
+    "n_A": 6,
     "n_S": 3,
+    "n_error": 0,
     "n_units": 8,
     "run_id": "mock__B0__MT__mocklcinject-8k__a08dc046__s00r0__0__20261011T000000",
     "s_source_run_id": "mock__B0__MT__mocklcinject-8k__a08dc046__s00r0__0__20261011T000000",
@@ -132,6 +134,14 @@
     "unit": "ns",
     "value": 1443840000.0
   },
+  "error_units": {
+    "attack": 0,
+    "benign": 0,
+    "by_kind": {},
+    "n": 8,
+    "unit": "units",
+    "value": 0
+  },
   "exposed_tokens_p50": {
     "n": 0,
     "not_applicable": true,
@@ -199,6 +209,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -208,6 +219,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -217,6 +229,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -231,6 +244,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -240,6 +254,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -249,6 +264,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -263,6 +279,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -272,6 +289,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -281,6 +299,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -295,6 +314,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -304,6 +324,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -313,6 +334,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -327,6 +349,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -336,6 +359,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -345,6 +369,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -359,6 +384,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -368,6 +394,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -377,6 +404,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -391,6 +419,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -400,6 +429,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -409,6 +439,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -423,6 +454,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -432,6 +464,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -441,6 +474,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -455,6 +489,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -464,6 +499,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -473,6 +509,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -487,6 +524,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -496,6 +534,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -505,6 +544,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -519,6 +559,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -528,6 +569,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -537,6 +579,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -551,6 +594,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -560,6 +604,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -569,6 +614,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -583,6 +629,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -592,6 +639,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -601,6 +649,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -615,6 +664,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -624,6 +674,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -633,6 +684,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -647,6 +699,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -656,6 +709,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -665,6 +719,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -679,6 +734,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -688,6 +744,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -697,6 +754,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -711,6 +769,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -720,6 +779,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -729,6 +789,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -743,6 +804,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -752,6 +814,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -761,6 +824,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -775,6 +839,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -784,6 +849,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -793,6 +859,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -807,6 +874,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -816,6 +884,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -825,6 +894,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -839,6 +909,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -848,6 +919,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -857,6 +929,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -871,6 +944,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -880,6 +954,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -889,6 +964,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -903,6 +979,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -912,6 +989,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -921,6 +999,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0
@@ -935,6 +1014,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -944,6 +1024,7 @@
     "ci_low": 1.0,
     "den": 3,
     "n": 3,
+    "n_missing_rows": 0,
     "num": 3,
     "unit": "ratio",
     "value": 1.0
@@ -953,6 +1034,7 @@
     "ci_low": 1.0,
     "den": 6,
     "n": 6,
+    "n_missing_rows": 0,
     "num": 6,
     "unit": "ratio",
     "value": 1.0

@@ -62,7 +62,7 @@ def _sbatch(args: list[str]) -> subprocess.CompletedProcess:
 def cmd_run(a: argparse.Namespace) -> int:
     from ag.config.schema import load_exp
     from ag.harness.run import main as run_main
-    from ag.sweep.expand import expand, fresh_ts, write_jobs
+    from ag.sweep.expand import expand, fairness_mismatches, fresh_ts, write_jobs
 
     out = a.out or os.environ.get("AG_OUT", "results")
     if not a.sbatch:
@@ -72,6 +72,10 @@ def cmd_run(a: argparse.Namespace) -> int:
     exp = load_exp(a.config)
     ts = fresh_ts(Path(out) / "raw" / exp["exp_id"] / "jobs")
     jobs = expand(exp, ts=ts, clock=a.clock)
+    mism = fairness_mismatches(jobs, exp.get("fairness_exempt") or [])
+    if mism:
+        print("checks.fairness_knobs_equal failed:\n  " + "\n  ".join(mism), file=sys.stderr)
+        return 3
     write_jobs(out, jobs, ts)
     slurm = exp.get("slurm") or {}
     waves = [[j for j in jobs if not j.parent_run_ids], [j for j in jobs if j.parent_run_ids]]

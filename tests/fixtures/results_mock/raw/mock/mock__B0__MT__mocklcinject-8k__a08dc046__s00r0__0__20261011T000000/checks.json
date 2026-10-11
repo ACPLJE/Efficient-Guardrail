@@ -83,5 +83,15 @@
     "detail": "",
     "name": "all_requests_have_outcomes",
     "ok": true
+  },
+  {
+    "detail": "1 jobs compared at expand; exempt=[]",
+    "name": "fairness_knobs_equal",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "s_source_available",
+    "ok": true
   }
 ]

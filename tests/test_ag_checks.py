@@ -97,6 +97,25 @@ def test_deadline_slack_and_early_block():
                                                                        cached_ns=10))
 
 
+def test_release_on_cached_unsafe_verdict_caught():
+    evs = [ev(0, E.ARRIVED), ev(0, E.ADMITTED), ev(1, E.PREFILL_START), ev(5, E.PREFILL_DONE),
+           ev(20, E.CHUNK_GENERATED, chunk_id=0, cached_verdict_ns=10,
+              payload={"cached_windows": [3], "cached_unsafe_windows": [3], "window_spec": "128x2"}),
+           ev(21, E.CHUNK_RELEASED, chunk_id=0), ev(21, E.CHUNK_DELIVERED, chunk_id=0), ev(30, E.FINISHED)]
+    assert "no_release_before_verdict" in failed(evs)
+    safe = [e if e.type != E.CHUNK_GENERATED else ev(20, E.CHUNK_GENERATED, chunk_id=0, cached_verdict_ns=10,
+            payload={"cached_windows": [3], "cached_unsafe_windows": [], "window_spec": "128x2"}) for e in evs]
+    assert "no_release_before_verdict" not in failed(safe)
+
+
+def test_empty_oracle_selection_needs_no_verdict():
+    evs = [ev(0, E.ARRIVED), ev(0, E.ADMITTED), ev(1, E.PREFILL_START), ev(5, E.PREFILL_DONE),
+           ev(20, E.CHUNK_GENERATED, chunk_id=0, payload={"selected": []}),
+           ev(21, E.CHUNK_RELEASED, chunk_id=0), ev(21, E.CHUNK_DELIVERED, chunk_id=0), ev(30, E.FINISHED)]
+    assert "chunk_without_verdict" in failed(evs)
+    assert "chunk_without_verdict" not in failed(evs, {**FLAGS, "selector": {"rule": "oracle"}})
+
+
 def test_one_decision_per_chunk():
     evs = good() + [ev(32, E.CHUNK_BLOCKED, chunk_id=0, reason="inj_window")]
     assert "invariants.one_decision_per_chunk" in failed(evs)

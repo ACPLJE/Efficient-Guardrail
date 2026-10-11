@@ -107,12 +107,17 @@ def test_rbv_stops_judging_once_unsafe_is_known(tmp_path):
             assert not [e for e in evs if e.type == E.JOB_SUBMITTED and e.t_ns > min(unsafe)], rid
 
 
-def test_late_unsafe_verdict_counts_for_fpr_inj(tmp_path):
-    # B1b with a fast target: every chunk is out before the verdict; false positives still count
-    d = run_overlay(tmp_path, "b1b", "B1b", {"release_before_verdict": True,
+@pytest.mark.parametrize("cache", ["off", "per_request"])
+def test_late_unsafe_verdict_counts_for_fpr_inj(tmp_path, cache):
+    # B1b with a fast target: every chunk is out before the verdict; false positives still count.
+    # With the cache off no chunk carries cached_unsafe_windows, so only the JOB_DONE rule can add the reason.
+    d = run_overlay(tmp_path, "b1b", "B1b", {"release_before_verdict": True, "verdict_cache": cache,
                                              "mock": {"tpot_ms": 0.1, "judge": {"false_positive_rate": 0.15}}})["B1b"]
     assert checks_ok(d)
     per = events(d)
+    if cache == "off":
+        assert not any(e.payload.get("cached_windows") for evs in per.values() for e in evs
+                       if e.type == E.CHUNK_GENERATED)
     outcomes = {o["unit_id"]: o for o in rows(d / "outcomes.jsonl")}
     flagged = [rid for rid, evs in per.items()
                if any(e.type == E.JOB_DONE and any(v.unsafe for v in e.verdicts) for e in evs)]
@@ -165,10 +170,13 @@ def test_rbv_fpr_does_not_depend_on_cache_policy(tmp_path):
     assert nums["per_request"] == nums["global"] > 0
 
 
-def test_judged_windows_spec_follows_the_judge(tmp_path):
-    runs = run_overlay(tmp_path, "w256", "W256", {"judge_windows": ["256x2"]})
-    assert {o["judged_windows_spec"] for o in rows(runs["W256"] / "outcomes.jsonl")} == {"256x2"}
+def test_judged_windows_spec_follows_the_judged_grid(tmp_path):
+    # the mock judges the target's own split_tokens x 2 grid; the spec reported is that grid
+    runs = run_overlay(tmp_path / "a", "w64", "W64", {}, record={"split_tokens": 64})
+    assert {o["judged_windows_spec"] for o in rows(runs["W64"] / "outcomes.jsonl")} == {"64x2"}
     assert {o["judged_windows_spec"] for o in rows(runs["B0"] / "outcomes.jsonl")} == {""}
+    with pytest.raises(ValueError, match="judge_windows"):         # a different spec is not silently relabelled
+        run_overlay(tmp_path / "b", "w256", "W256", {"judge_windows": ["256x2"]})
 
 
 def test_record_split_tokens_reaches_the_target(tmp_path):
@@ -199,13 +207,20 @@ def test_target_only_split_tokens_reaches_the_records(tmp_path):
 
 
 def test_cache_only_requests_keep_their_window_spec(tmp_path):
-    d = run_overlay(tmp_path, "c1", "C1", {"verdict_cache": "global", "block_before_generation": True,
-                                           "selector": {"rule": "random", "k": 1}},
-                    data={"n_attack": 8, "n_benign": 8, "length_classes": ["2k", "8k"]})["C1"]
-    assert checks_ok(d)
-    rs = rows(d / "outcomes_run.jsonl")
-    assert any(r["judged_windows_uncached"] == 0 and r["judged_windows"] > 0 for r in rs)
-    assert {o["judged_windows_spec"] for o in rows(d / "outcomes.jsonl")} == {"128x2"}
+    from ag.data.types import Verdict
+    from ag.harness.runner import outcome_run_row
+    from ag.judges.base import cache_key
+    from ag.data import window_map as wm
+    s, req = _mock_ag(tmp_path, verdict_cache="global", block_before_generation=True, selector={"rule": "all"})
+    rp = s.target.render(req)
+    eligible = [int(w) for w in range(len(wm.eligible_windows(rp.block_untrusted_array())))
+                if wm.eligible_windows(rp.block_untrusted_array())[w]]
+    for x in s._judge_inputs(req, rp, None, eligible, None, None):          # every window already judged safe
+        s.cache.put("other", cache_key(s.judge, x),
+                    Verdict("MJ", "other", None, x.window_id, "128x2", 0.1, 0.5, "F5", False, 5, 1, cached=True))
+    row = outcome_run_row(req, list(s.run(req)))
+    assert row["judged_windows_uncached"] == 0 and row["judged_windows"] == len(eligible) > 0
+    assert row["judged_windows_spec"] == "128x2"
 
 
 def test_split_tokens_conflict_fails_at_setup(tmp_path):
@@ -260,33 +275,118 @@ def test_per_site_hits_reach_outcomes(tmp_path):
     assert "hit@8[union_any]" in load_json(b0 / "summary.json")
 
 
-def test_global_cache_hits_are_restamped(tmp_path):
+def _mock_ag(tmp_path, emit=lambda e: None, clock=None, length="1k", **flag_upd):
+    """A set-up mock AG MockSystem outside the runner, and one attack request."""
     import logging
     from ag.config.schema import load_system
     from ag.data import mock_lc_inject
-    from ag.data.types import Verdict
     from ag.harness.context import RunContext, VirtualClock
     from ag.harness.lineage import build_lineage
-    from ag.judges.base import cache_key
     from ag.systems.base import SystemConfig
-    from ag.systems.mock_system import MockSystem, _Timeline
+    from ag.systems.mock_system import MockSystem
     sysd = load_system("mock_ag")
-    flags = {**sysd["flags"], "verdict_cache": "global"}
+    flags = {**sysd["flags"], **flag_upd}
     lin = build_lineage("r", "mock", "c", clock="virtual", seed=0, producer="mock", model_sha={}, data_manifest_sha="")
-    ctx = RunContext("r", "mock", tmp_path, VirtualClock(), 0, lin, None, lambda e: None, logging.getLogger("t"))
+    ctx = RunContext("r", "mock", tmp_path, clock or VirtualClock(), 0, lin, None, emit, logging.getLogger("t"))
     s = MockSystem()
-    s.setup(SystemConfig("AG", "mock", flags, exp={"operating_point": "F5", "fairness": {"max_new_tokens": 16}}), ctx)
-    req = mock_lc_inject.generate(n_pairs=1, length_classes=["1k"])[0]
+    s.setup(SystemConfig("AG", "mock", flags, exp={"operating_point": "F5", "fairness": {"max_new_tokens": 48}}), ctx)
+    return s, mock_lc_inject.generate(n_pairs=1, length_classes=[length])[0]
+
+
+def test_global_cache_hits_are_restamped(tmp_path):
+    from ag.data.types import Verdict
+    from ag.judges.base import cache_key
+    from ag.systems.mock_system import _Timeline
+    s, req = _mock_ag(tmp_path, verdict_cache="global")
     rp = s.target.render(req)
     w = rp.payload_windows[0]
     x = s._judge_inputs(req, rp, 3, [w], None, None)[0]
     s.cache.put("other", cache_key(s.judge, x),
                 Verdict("MJ", "other/request", 7, 99, "128x2", 0.95, 0.5, "F5", True, 5, 1, cached=True))
-    s._job_seq = 0
     job, done, cached_ns, vs, _ = s._judge(_Timeline("r", req.request_id, "virtual"), req, rp, 3, [w], 100, 0,
                                            {"attempt": 0}, deadline_ns=None)
     assert job is None and done is None and cached_ns == 5
     assert (vs[0].request_id, vs[0].chunk_id, vs[0].window_id, vs[0].cached) == (req.request_id, 3, w, True)
+
+
+def test_concurrent_runs_keep_job_ids_unique_and_timing_sequential(tmp_path):
+    # SPEC 4.2: System.run is thread-safe; openai_front drives one system from many handler threads.
+    # verdict_cache off + 4k prompts: every chunk submits its own job, so a shared counter would collide.
+    import dataclasses
+    import threading
+    from ag.data import mock_lc_inject
+    from ag.harness.events import by_request
+    from ag.metrics import per_request as pr
+
+    base = mock_lc_inject.generate(n_pairs=3, length_classes=["4k"], seed=1)
+    reqs = [dataclasses.replace(r, request_id=f"{r.request_id}#{i}") for i, r in enumerate(base * 8)]
+
+    def drive(threads: int) -> dict:
+        got, lock = [], threading.Lock()
+        s, _ = _mock_ag(tmp_path, length="4k", verdict_cache="off")
+
+        def work(part):
+            for r in part:
+                evs = list(s.run(r))
+                with lock:
+                    got.extend(evs)
+        ths = [threading.Thread(target=work, args=(reqs[i::threads],)) for i in range(threads)]
+        [t.start() for t in ths]
+        [t.join() for t in ths]
+        return by_request(got)
+
+    seq, par = drive(1), drive(8)
+    assert set(seq) == set(par) == {r.request_id for r in reqs}
+    benign = {r.request_id for r in reqs if not r.is_attack}
+    for rid, evs in par.items():
+        ids = [e.job_id for e in evs if e.type == E.JOB_SUBMITTED]
+        assert len(ids) == len(set(ids)), rid
+        assert rid not in benign or len(ids) > 1, rid          # benign requests pass every chunk: one job each
+        assert sorted(ids) == sorted(e.job_id for e in seq[rid] if e.type == E.JOB_SUBMITTED), rid
+        a, b = pr.times_from_events(seq[rid]), pr.times_from_events(evs)
+        assert pr.gate_delays(a) == pr.gate_delays(b) and pr.exposed_tokens(b) == 0, rid
+
+
+def test_oracle_live_run_passes_checks(tmp_path):
+    d = run_overlay(tmp_path, "orc", "ORC", {"selector": {"rule": "oracle"}, "evaluation_only": True})["ORC"]
+    assert checks_ok(d)
+    outcomes = rows(d / "outcomes.jsonl")
+    assert all(o["blocked"] for o in outcomes if o["is_attack"])
+    assert all(not o["blocked"] and o["judged_windows"] == 0 for o in outcomes if not o["is_attack"])
+
+
+def test_evaluation_only_never_qualifies_for_latest():
+    from ag.harness.runner import latest_eligible
+    clean = {"clock": "monotonic", "code_dirty": False}
+    assert latest_eligible(clean, "sglang-0.5.21", True, {})
+    assert not latest_eligible(clean, "sglang-0.5.21", True, {"evaluation_only": True})
+
+
+def test_outcome_row_written_after_finished_is_on_disk(tmp_path, monkeypatch):
+    import ag.harness.runner as R
+    seen = []
+    real = R.outcome_run_row
+
+    def spy(req, evs):
+        d = next((tmp_path / "out" / "raw" / "mock").glob("*__B0__*"))
+        on_disk = [json.loads(l) for l in (d / "events.jsonl").read_text().splitlines()]
+        seen.append(any(e["request_id"] == req.request_id and e["type"] == "FINISHED" for e in on_disk))
+        return real(req, evs)
+    monkeypatch.setattr(R, "outcome_run_row", spy)
+    exp = small_exp(tmp_path, systems=["mock_b0"])
+    assert run_main(["--config", str(exp), "--out", str(tmp_path / "out")]) == 0
+    assert seen and all(seen)
+
+
+def test_record_must_cover_selector_layers_before_generation(tmp_path):
+    exp = small_exp(tmp_path, systems=["mock_b0"], record={"layers": "tracked8"},
+                    selector={"layers": ["upper_half", "tracked8"]})
+    p = system_file(tmp_path, "b0t", "mock_b0.yaml", "B0T", {"mock": {"target": {"n_layers": 32}}})
+    exp.write_text(exp.read_text().replace("- mock_b0", f"- {p}"))
+    with pytest.raises(ValueError, match="does not cover"):
+        run_main(["--config", str(exp), "--out", str(tmp_path / "out")])
+    assert not (tmp_path / "out" / "raw" / "mock").exists() or \
+        not list((tmp_path / "out" / "raw" / "mock").glob("*/events.jsonl"))       # refused before any run
 
 
 def test_deadline_miss_fails_closed(tmp_path):

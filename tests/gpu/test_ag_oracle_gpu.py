@@ -4,7 +4,7 @@ import pytest
 
 
 def test_tiny_ledger_cuda_matches_cpu():
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from lgs1.lgcore.model import tiny_qwen3
     from ag.reference.ledger_oracle import decode_with_ledger
     from ag.targets.base import RecordSpec

@@ -8,8 +8,10 @@ outcomes_run.jsonl per request, runs the checks, and finally score_outcomes.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import json
 import logging
+import os
 import sys
 import threading
 from collections.abc import Iterator, Mapping, Sequence
@@ -18,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from ag import SCHEMA_VERSION
 from ag.data import mock_lc_inject
 from ag.data.manifest import stamp, write_manifest
 from ag.data.types import Generation, Request
@@ -28,7 +31,7 @@ from ag.harness.checks import Check
 from ag.harness.events import Event, EventType as E, JobKind, event_from_row
 from ag.harness.lineage import build_lineage, close_lineage, open_lineage
 from ag.harness.writer import JsonlWriter, atomic_write_json, atomic_write_text, drop_partial_tail, read_rows
-from ag.metrics.score import score_outcomes
+from ag.metrics.score import check_record_covers_selector, score_outcomes
 from ag.reference.record import RecordStore
 from ag.sweep.expand import Job
 from ag.systems.base import SystemConfig
@@ -151,22 +154,37 @@ def _done_requests(events_path: Path) -> tuple[set[str], int]:
 
 
 def _append_index(out_root: Path, job: Job, run_dir: Path) -> None:
+    """Append this run to raw/index.jsonl. Array tasks on other nodes append to the same file, so the
+    dedup read and the append happen under an exclusive file lock and the row is fsynced before the
+    lock is released (O_APPEND alone is not safe for concurrent appenders on NFS)."""
     idx = out_root / "raw" / "index.jsonl"
-    with _INDEX_LOCK:
-        if any(r.get("run_id") == job.run_id for r in read_rows(idx)):
-            return
-        with JsonlWriter(idx, job.run_id, repair_tail=False) as w:
-            w.write({"path": str(run_dir.relative_to(out_root)), "exp_id": job.exp_id, "system_id": job.system_id})
+    idx.parent.mkdir(parents=True, exist_ok=True)
+    row = {"path": str(run_dir.relative_to(out_root)), "exp_id": job.exp_id, "system_id": job.system_id,
+           "run_id": job.run_id, "schema_version": SCHEMA_VERSION}
+    with _INDEX_LOCK, open(idx, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            if any(r.get("run_id") == job.run_id for r in read_rows(idx)):
+                return
+            f.seek(0, os.SEEK_END)
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def latest_eligible(lineage: Mapping[str, Any], engine: str | None, checks_ok: bool) -> bool:
-    """latest.txt eligibility, defined only here (SPEC 7.1)."""
+def latest_eligible(lineage: Mapping[str, Any], engine: str | None, checks_ok: bool,
+                    flags: Mapping[str, Any] | None = None) -> bool:
+    """latest.txt eligibility, defined only here (SPEC 7.1). evaluation_only runs (B-oracle) use the
+    answer key and never qualify (SPEC 9.1)."""
     return (lineage.get("clock") == "monotonic" and not lineage.get("code_dirty", True)
-            and engine not in (None, "mock") and checks_ok)
+            and engine not in (None, "mock") and checks_ok
+            and not bool((flags or {}).get("evaluation_only", False)))
 
 
 def run_job(job: Job, out_root: str | Path, *, cmd: str | None = None, log: logging.Logger | None = None,
-            limit: int | None = None) -> Path:
+            limit: int | None = None, fairness_detail: str = "not compared (single job)") -> Path:
     out_root = Path(out_root)
     jr = job.resolved
     run_dir = out_root / "raw" / job.exp_id / job.run_id
@@ -178,15 +196,17 @@ def run_job(job: Job, out_root: str | Path, *, cmd: str | None = None, log: logg
         ag_log.setLevel(logging.INFO)
     ag_log.addHandler(handler)
     try:
-        return _run_job(job, out_root, run_dir, jr, cmd=cmd, log=log or logging.getLogger("ag.run"), limit=limit)
+        return _run_job(job, out_root, run_dir, jr, cmd=cmd, log=log or logging.getLogger("ag.run"), limit=limit,
+                        fairness_detail=fairness_detail)
     finally:
         ag_log.removeHandler(handler)
         handler.close()
 
 
 def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, cmd: str | None,
-             log: logging.Logger, limit: int | None) -> Path:
+             log: logging.Logger, limit: int | None, fairness_detail: str) -> Path:
     log.info("run %s start (%s)", job.run_id, job.system_id)
+    check_record_covers_selector(jr)        # fail before generation, not in score_outcomes afterwards
 
     reqs, params = build_requests(jr)
     reqs, sha = stamp(reqs)
@@ -218,7 +238,7 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
     info = system.info()
     lin = dataclasses.replace(lin, model_sha=dict(info.model_sha), shim_active=info.shim_active, patch_sha=info.patch_sha)
     try:
-        lin, resumed = open_lineage(run_dir, lin)
+        lin, _ = open_lineage(run_dir, lin)
     except Exception:
         collector.close()
         raise
@@ -235,6 +255,7 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
                 continue
             evs = list(drive_request(system, req, emit=collector.emit, clock=clock, run_id=job.run_id,
                                      attempt=attempt, b0_chunks=b0_chunks, t_source=src))
+            collector.flush()           # FINISHED / fatal ERROR is on disk before the outcomes_run row (resume order)
             out_rows.write(outcome_run_row(req, evs))
     finally:
         out_rows.close()
@@ -248,16 +269,22 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
     have_rows = {r["request_id"] for r in read_rows(run_dir / "outcomes_run.jsonl")}
     missing = sorted({r.request_id for r in reqs} - have_rows)
     checks.append(Check("all_requests_have_outcomes", not missing, ", ".join(missing[:5])))
-    atomic_write_json(run_dir / "checks.json", [c.to_json() for c in checks])
+    checks.append(Check("fairness_knobs_equal", True, fairness_detail))
+    atomic_write_json(run_dir / "checks.json", [c.to_json() for c in checks])   # before scoring (it may raise)
     lin = close_lineage(run_dir, lin)
     _append_index(out_root, job, run_dir)
-    score_outcomes(run_dir)
+    summary = score_outcomes(run_dir)
+    meta = summary.get("_meta", {})
+    has_s = bool(info.flags.get("b0_chunks")) or meta.get("s_source_run_id") is not None
+    checks.append(Check("s_source_available", has_s,
+                        "" if has_s else f"parent B0 run {job.parent_run_ids} not indexed or not scored yet"))
+    atomic_write_json(run_dir / "checks.json", [c.to_json() for c in checks])
     summary_path = run_dir / "summary.json"
     if summary_path.exists():
         s = json.loads(summary_path.read_text())
         s["_meta"]["system_info"] = info.to_json()
         s["_meta"]["checks_ok"] = all_ok(checks)
         atomic_write_json(summary_path, s)
-    if latest_eligible(lin.to_json(), info.engine, all_ok(checks)):
+    if latest_eligible(lin.to_json(), info.engine, all_ok(checks), info.flags):
         atomic_write_text(out_root / "raw" / job.exp_id / "latest.txt", job.run_id + "\n")
     return run_dir

@@ -12,7 +12,7 @@ flags:
   scorer_combine: none
   selector: { rule: topk, k: 8, layers: tracked8, head_weighting: uniform, first_token: skip }
   judge: MJ
-  judge_windows: ["128x2"]
+  # judge_windows: the mock judges the target's own grid (split_tokens x 2); leave unset
   thresholds: { MJ: { F5: 0.5, F1: 0.8, R80: 0.5 } }
   block_before_generation: false
   judge_all_before_first_release: false

@@ -51,7 +51,10 @@ def test_sbatch_test_only_then_submit(tmp_path, fake_sbatch):
     fake_sbatch.write_text("")
     assert agctl.main(["run", "--config", cfg, "--out", str(out), "--sbatch", "--submit"]) == 0
     calls = fake_sbatch.read_text().splitlines()
-    assert [c.split()[0] for c in calls] == ["--test-only", "--test-only", calls[2].split()[0], "--dependency=afterok:4242"]
+    assert len(calls) == 4 and calls[0].startswith("--test-only ") and calls[1].startswith("--test-only ")
+    w0, w1 = calls[0].split()[1], calls[1].split()[1]
+    assert calls[2].split() == [w0]                                   # wave 0: the bare script
+    assert calls[3].split() == ["--dependency=afterok:4242", w1]      # wave 1 waits for wave 0's job id
 
 
 def test_clock_passed_to_array_tasks(tmp_path, fake_sbatch):

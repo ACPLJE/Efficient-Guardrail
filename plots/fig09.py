@@ -84,4 +84,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except C.RunRejected as e:
         print(f"fig09: {e}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
