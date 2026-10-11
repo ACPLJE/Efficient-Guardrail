@@ -58,6 +58,22 @@ def test_resume_after_partial_write(tmp_path):
     assert max(r["attempt"] for r in rows) == 1
 
 
+@pytest.mark.parametrize("name", ["events.jsonl", "outcomes_run.jsonl"])
+def test_resume_keeps_complete_row_without_newline(tmp_path, name):
+    exp = small_exp(tmp_path, systems=["mock_b0"])
+    out = tmp_path / "out"
+    args = ["--config", str(exp), "--out", str(out), "--ts", "20261011T000003"]
+    assert run_main(args) == 0
+    d = run_dirs(out)["B0"]
+    p = d / name
+    n = len(p.read_text().splitlines())
+    p.write_bytes(p.read_bytes()[:-1])                                # crash just before the last newline
+    assert run_main(args) == 0
+    assert _ok(d)
+    assert len(p.read_text().splitlines()) == n
+    assert len((d / "outcomes.jsonl").read_text().splitlines()) == 8
+
+
 def test_resume_reruns_request_without_outcome_row(tmp_path):
     exp = small_exp(tmp_path, systems=["mock_b0"])
     out = tmp_path / "out"

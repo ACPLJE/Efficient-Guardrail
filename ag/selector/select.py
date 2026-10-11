@@ -59,9 +59,9 @@ def record_layer_index(rec: LedgerRecord, cfg: SelectorConfig, *, n_target_layer
                        attn_kind: Sequence[str] | None = None) -> np.ndarray:
     """Indices into rec.layers for cfg.layers.
 
-    Named specs are resolved over the target's full-attention layers. Without n_target_layers the
-    recorded layers are taken as the full list, which is right when the Record was written with
-    layers="all".
+    Named specs (tracked8, upper_half, last, all) are resolved over the target's full-attention
+    layers, so they need n_target_layers (and attn_kind for targets with sliding layers, D-037). A
+    Record does not say which spec wrote it, so its layer ids are never taken as the target's list.
     """
     recorded = [int(x) for x in rec.layers]
     if isinstance(cfg.layers, (tuple, list)):
@@ -69,10 +69,8 @@ def record_layer_index(rec: LedgerRecord, cfg: SelectorConfig, *, n_target_layer
     elif n_target_layers is not None:
         want = resolve_layers(cfg.layers, n_target_layers, attn_kind)
     else:
-        if recorded != list(range(len(recorded))):
-            raise ValueError(f"{rec.request_id}: layer spec {cfg.layers!r} on a Record not written with layers='all' "
-                             f"(has {recorded}); pass n_target_layers / attn_kind")
-        want = resolve_layers(cfg.layers, len(recorded))
+        raise ValueError(f"{rec.request_id}: layer spec {cfg.layers!r} needs n_target_layers / attn_kind "
+                         f"(the Record has layers {recorded})")
     missing = [l for l in want if l not in recorded]
     if missing:
         raise ValueError(f"{rec.request_id}: layers {missing} not in the Record (has {recorded})")

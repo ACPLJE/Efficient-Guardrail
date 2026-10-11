@@ -49,6 +49,10 @@ def test_split_tokens_must_match_and_forced_text():
     free = t.generate(rp, 12, record=None)
     forced = t.generate(rp, 12, record=None, forced_output=free.output_ids[:5])
     assert forced.output_ids == free.output_ids[:5] and forced.text.split() == free.text.split()[:5]
+    fresh = MockTarget(seed=0)                     # replay on another instance (the usual teacher forcing)
+    replay = fresh.generate(fresh.render(mock_lc_inject.generate(n_pairs=1, length_classes=["1k"])[0]), 12,
+                            record=None, forced_output=free.output_ids)
+    assert replay.text == free.text
 
 
 def test_filters_and_ambiguity(tmp_path):

@@ -1,4 +1,5 @@
 """MockSystem flag combinations on the harness (SPEC 3.4, 6.2 identity 3, 9.1)."""
+import json
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from _ag_util import load_json, rows, run_dirs, small_exp, system_file
 from ag.harness.events import EventType as E, by_request, event_from_row
 from ag.harness.run import main as run_main
 from ag.metrics import per_request as pr
+from ag.metrics.score import score_outcomes
 
 
 def run_overlay(tmp_path: Path, name: str, system_id: str, override: dict, **exp_upd) -> dict[str, Path]:
@@ -46,7 +48,8 @@ def test_ag_has_no_exposed_tokens(tmp_path):
 
 
 def test_block_before_generation(tmp_path):
-    d = run_overlay(tmp_path, "b1a", "B1a", {"block_before_generation": True, "selector": {"rule": "all"}})["B1a"]
+    d = run_overlay(tmp_path, "b1a", "B1a", {"block_before_generation": True, "selector": {"rule": "all"},
+                                             "mock": {"judge": {"false_positive_rate": 0.0}}})["B1a"]
     assert checks_ok(d)
     per = events(d)
     outcomes = {o["unit_id"]: o for o in rows(d / "outcomes.jsonl")}
@@ -119,20 +122,148 @@ def test_late_unsafe_verdict_counts_for_fpr_inj(tmp_path):
     assert load_json(d / "summary.json")["fpr_inj"]["num"] == len(benign_flagged)
 
 
+def _rewrite(path: Path, rs: list[dict]) -> None:
+    path.write_text("".join(json.dumps(r) + "\n" for r in rs))
+
+
 def test_blocked_units_have_zero_utility(tmp_path):
-    # the review's reproduction: a benign unit released at chunk 0 (ANSWER delivered), blocked at chunk 1
-    d = run_overlay(tmp_path, "fp", "FP", {"mock": {"judge": {"false_positive_rate": 0.15}}},
-                    data={"length_classes": ["8k"], "n_attack": 8, "n_benign": 8},
-                    fairness={"max_new_tokens": 64})["FP"]
-    outcomes = rows(d / "outcomes.jsonl")
-    assert any(o["blocked"] and not o["is_attack"] for o in outcomes)
-    assert all(o["utility"] is False for o in outcomes if o["blocked"])
-    success = {r["unit_id"]: r for r in rows(d / "success.jsonl")}
-    assert any(success[o["unit_id"]]["utility"] for o in outcomes if o["blocked"])   # raw judge verdict kept
+    # a benign unit whose chunk 0 (with ANSWER) was delivered and a later chunk blocked
+    d = run_overlay(tmp_path, "agu", "AGU", {"mock": {"judge": {"false_positive_rate": 0.0}}})["AGU"]
+    rs = rows(d / "outcomes_run.jsonl")
+    r = next(x for x in rs if not x["is_attack"] and not x["blocked"])
+    gen = r["generation"]
+    gen.update(blocked=True, block_reason="inj_window", text_delivered=" ".join(gen["text_generated"].split()[:8]))
+    r.update(blocked=True, block_reason="inj_window", block_reasons=["inj_window"])
+    _rewrite(d / "outcomes_run.jsonl", rs)
+    score_outcomes(d)
+    o = next(x for x in rows(d / "outcomes.jsonl") if x["unit_id"] == r["request_id"])
+    succ = next(x for x in rows(d / "success.jsonl") if x["unit_id"] == r["request_id"])
+    assert o["blocked"] and o["utility"] is False and succ["utility"] is True     # raw judge verdict kept
+    s = load_json(d / "summary.json")
+    assert s["utility"]["num"] == sum(1 for x in rows(d / "outcomes.jsonl") if not x["is_attack"] and x["utility"])
+
+
+def test_request_blocked_after_cache_hits_counts_them(tmp_path):
+    d = run_overlay(tmp_path, "b1g", "B1G", {"block_before_generation": True, "selector": {"rule": "all"},
+                                             "verdict_cache": "global",
+                                             "mock": {"judge": {"false_positive_rate": 0.15}}})["B1G"]
+    assert checks_ok(d)
+    runrows = rows(d / "outcomes_run.jsonl")
+    assert any(r["blocked"] and not r["is_attack"] and r["judged_windows_uncached"] < r["judged_windows"]
+               for r in runrows)                                     # REQUEST_BLOCKED on cache hits happens
+    assert all(r["judged_windows"] == r["n_eligible"] for r in runrows)
+
+
+def test_rbv_fpr_does_not_depend_on_cache_policy(tmp_path):
+    nums = {}
+    for pol in ("per_request", "global"):
+        d = run_overlay(tmp_path / pol, "b1b", "B1b", {"release_before_verdict": True, "verdict_cache": pol,
+                                                       "mock": {"tpot_ms": 0.1, "judge": {"false_positive_rate": 0.05}}},
+                        data={"n_attack": 16, "n_benign": 16})["B1b"]
+        assert checks_ok(d)
+        nums[pol] = load_json(d / "summary.json")["fpr_inj"]["num"]
+    assert nums["per_request"] == nums["global"] > 0
+
+
+def test_judged_windows_spec_follows_the_judge(tmp_path):
+    runs = run_overlay(tmp_path, "w256", "W256", {"judge_windows": ["256x2"]})
+    assert {o["judged_windows_spec"] for o in rows(runs["W256"] / "outcomes.jsonl")} == {"256x2"}
+    assert {o["judged_windows_spec"] for o in rows(runs["B0"] / "outcomes.jsonl")} == {""}
+
+
+def test_record_split_tokens_reaches_the_target(tmp_path):
+    runs = run_overlay(tmp_path, "s64", "S64", {}, record={"split_tokens": 64})
+    for sid, d in runs.items():
+        assert checks_ok(d), sid
+        assert all(o["error_kind"] is None for o in rows(d / "outcomes.jsonl")), sid
+    idx = rows(runs["B0"] / "records" / "index.jsonl")
+    assert idx and all(r["n_blocks"] == -(-r["prompt_len"] // 64) for r in idx)
+
+
+def test_split_tokens_conflict_fails_at_setup(tmp_path):
+    with pytest.raises(ValueError, match="split_tokens"):
+        p = system_file(tmp_path, "b0s", "mock_b0.yaml", "B0S", {"mock": {"target": {"split_tokens": 64}}})
+        exp = small_exp(tmp_path, systems=[str(p)], record={"split_tokens": 128})
+        run_main(["--config", str(exp), "--out", str(tmp_path / "out")])
+
+
+def test_partial_record_layers_scored_with_target_layers(tmp_path):
+    # B0 records only tracked8 of a 32-layer mock target; scoring resolves tracked8 over the target
+    from ag.data import window_map as wm
+    from ag.reference.record import RecordStore
+    from ag.runtime.chunking import standard_chunk
+    from ag.selector.select import SelectorConfig, chunk_block_mass, payload_rank
+    p = system_file(tmp_path, "b0t", "mock_b0.yaml", "B0T",
+                    {"mock": {"target": {"n_layers": 32, "concentration": 0.05}}})     # noisy: ranks depend on layers
+    exp = small_exp(tmp_path, systems=[str(p)], record={"layers": "tracked8"}, selector={"layers": ["tracked8"]})
+    assert run_main(["--config", str(exp), "--out", str(tmp_path / "out")]) == 0
+    d = run_dirs(tmp_path / "out")["B0T"]
+    tracked = [16, 18, 20, 22, 25, 27, 29, 31]
+    assert rows(d / "records" / "index.jsonl")[0]["layers"] == tracked
+    hits = rows(d / "hits.jsonl")
+    payload = {r["request_id"]: r["payload_windows"] for r in rows(d / "outcomes_run.jsonl")}
+    checked = 0
+    for rec in RecordStore(d / "records").iter():
+        if not payload[rec.request_id]:
+            continue
+        el = wm.eligible_windows(rec.block_untrusted)
+        for cd in ("first8", "first32", "all"):     # tracked8 of 32 layers = every recorded layer
+            m = chunk_block_mass(rec, standard_chunk(cd, rec.n_tokens), SelectorConfig(layers=tuple(tracked)))
+            want = payload_rank(wm.window_scores_from_blocks(m, el), payload[rec.request_id])
+            got = next(h["payload_rank"] for h in hits if h["request_id"] == rec.request_id and h["chunk_def"] == cd)
+            assert got == want, (rec.request_id, cd)
+            checked += 1
+    assert checked >= 6
+
+
+def test_per_site_hits_reach_outcomes(tmp_path):
+    runs = run_overlay(tmp_path, "agp", "AGP", {})
+    b0, ag = runs["B0"], runs["AGP"]
+    rs = rows(b0 / "outcomes_run.jsonl")
+    for r in rs:
+        if r["payload_windows"]:
+            r["payload_windows_per_site"] = [r["payload_windows"], [0]]       # a second, far-away site
+    _rewrite(b0 / "outcomes_run.jsonl", rs)
+    score_outcomes(b0)
+    score_outcomes(ag)
+    for d in (b0, ag):
+        att = [o for o in rows(d / "outcomes.jsonl") if o["is_attack"]]
+        assert att and all({"union_any", "union_all"} <= set(o["hit"]) for o in att)
+    assert "hit@8[union_any]" in load_json(b0 / "summary.json")
+
+
+def test_global_cache_hits_are_restamped(tmp_path):
+    import logging
+    from ag.config.schema import load_system
+    from ag.data import mock_lc_inject
+    from ag.data.types import Verdict
+    from ag.harness.context import RunContext, VirtualClock
+    from ag.harness.lineage import build_lineage
+    from ag.judges.base import cache_key
+    from ag.systems.base import SystemConfig
+    from ag.systems.mock_system import MockSystem, _Timeline
+    sysd = load_system("mock_ag")
+    flags = {**sysd["flags"], "verdict_cache": "global"}
+    lin = build_lineage("r", "mock", "c", clock="virtual", seed=0, producer="mock", model_sha={}, data_manifest_sha="")
+    ctx = RunContext("r", "mock", tmp_path, VirtualClock(), 0, lin, None, lambda e: None, logging.getLogger("t"))
+    s = MockSystem()
+    s.setup(SystemConfig("AG", "mock", flags, exp={"operating_point": "F5", "fairness": {"max_new_tokens": 16}}), ctx)
+    req = mock_lc_inject.generate(n_pairs=1, length_classes=["1k"])[0]
+    rp = s.target.render(req)
+    w = rp.payload_windows[0]
+    x = s._judge_inputs(req, rp, 3, [w], None, None)[0]
+    s.cache.put("other", cache_key(s.judge, x),
+                Verdict("MJ", "other/request", 7, 99, "128x2", 0.95, 0.5, "F5", True, 5, 1, cached=True))
+    s._job_seq = 0
+    job, done, cached_ns, vs, _ = s._judge(_Timeline("r", req.request_id, "virtual"), req, rp, 3, [w], 100, 0,
+                                           {"attempt": 0}, deadline_ns=None)
+    assert job is None and done is None and cached_ns == 5
+    assert (vs[0].request_id, vs[0].chunk_id, vs[0].window_id, vs[0].cached) == (req.request_id, 3, w, True)
 
 
 def test_deadline_miss_fails_closed(tmp_path):
-    d = run_overlay(tmp_path, "dl", "DL", {"deadline_budget_ms": {"release": 1.0}})["DL"]
+    d = run_overlay(tmp_path, "dl", "DL", {"deadline_budget_ms": {"release": 1.0},
+                                           "mock": {"judge": {"false_positive_rate": 0.0}}})["DL"]
     assert checks_ok(d)
     outcomes = rows(d / "outcomes.jsonl")
     assert all(o["block_reason"] == "deadline_miss" for o in outcomes)

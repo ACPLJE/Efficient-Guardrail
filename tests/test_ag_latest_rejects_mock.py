@@ -57,6 +57,35 @@ def test_check_run_rejects_dirty_and_failed_checks(tmp_path):
         C.check_run(bad, allow_mock=False)
 
 
+def test_allow_mixed_data_flag_through_load_runs(tmp_path):
+    import argparse
+    import json
+    sys.path.insert(0, str(ROOT))
+    from plots import _common as C
+    raw = tmp_path / "raw" / "E"
+    raw.mkdir(parents=True)
+
+    def mk(name, **kw):
+        lin = {"run_id": name, "clock": "monotonic", "producer": "sglang-shim", "engine_version": "sglang-0.5.21",
+               "code_commit": "c1", "code_dirty": False, "data_manifest_sha": "d1", **kw}
+        (raw / name).mkdir()
+        (raw / name / "lineage.json").write_text(json.dumps(lin))
+        (raw / name / "checks.json").write_text("[]")
+    mk("a")
+    mk("b", data_manifest_sha="d2")
+    mk("c", code_commit="c2", data_manifest_sha="d2")
+
+    def load(*extra):
+        ap = argparse.ArgumentParser()
+        C.add_common_args(ap, default_exp="E")
+        return C.load_runs(ap.parse_args(["--out", str(tmp_path), *extra]))
+    with pytest.raises(C.RunRejected, match="data_manifest_sha"):
+        load("--run-id", "a", "--run-id", "b")
+    assert len(load("--run-id", "a", "--run-id", "b", "--allow-mixed-data")) == 2
+    with pytest.raises(C.RunRejected, match="code_commit"):
+        load("--run-id", "a", "--run-id", "c", "--allow-mixed-data")
+
+
 def test_check_consistent_code_and_data():
     sys.path.insert(0, str(ROOT))
     from plots import _common as C

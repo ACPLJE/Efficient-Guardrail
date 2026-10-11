@@ -19,3 +19,4 @@ figures/*.pdf
 *.jsonl
 *.egg-info/
 build/
+/tmp*/

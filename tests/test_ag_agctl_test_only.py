@@ -67,5 +67,37 @@ def test_clock_passed_to_array_tasks(tmp_path, fake_sbatch):
     assert run_main(["--config", cfg, "--out", str(out), "--ts", ts, "--clock", "virtual", "--job-index", "0"]) == 2
 
 
+def test_fresh_ts_skips_an_existing_expand(tmp_path, monkeypatch):
+    import ag.sweep.expand as X
+    seq = iter(["20261011T120000", "20261011T120000", "20261011T120001"])
+    monkeypatch.setattr(X.time, "strftime", lambda fmt, t=None: next(seq))
+    (tmp_path / "20261011T120000.jsonl").write_text("{}\n")
+    assert X.fresh_ts(tmp_path, sleep=lambda s: None) == "20261011T120001"
+
+
+def test_write_jobs_refuses_a_different_expand(tmp_path):
+    from ag.config.schema import load_exp
+    from ag.sweep.expand import JobsFileMismatch, expand, write_jobs
+    exp = load_exp(ROOT / "configs" / "exp" / "skeleton.yaml")
+    a = expand(exp, ts="20261011T120000")
+    b = expand({**exp, "fairness": {**exp["fairness"], "max_new_tokens": 8}}, ts="20261011T120000")
+    write_jobs(tmp_path, a, "20261011T120000")
+    assert write_jobs(tmp_path, a, "20261011T120000")                 # the same expand again is fine
+    with pytest.raises(JobsFileMismatch):
+        write_jobs(tmp_path, b, "20261011T120000")
+
+
+def test_job_script_ag_out_wins_over_env_file(tmp_path):
+    import subprocess
+    env_file = tmp_path / "ag.env"
+    env_file.write_text(f"export AG_OUT=/nonexistent/default\nexport AG_VENV={sys.prefix}\n")
+    mine = tmp_path / "mine"
+    r = subprocess.run(["bash", "-c", f'export AG_OUT="{mine}" AG_ENV_FILE="{env_file}"; '
+                                      f'source "{ROOT}/slurm/ag_common.sh" >/dev/null; echo "OUT=$AG_OUT"'],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert f"OUT={mine}" in r.stdout and (mine / "logs").is_dir()
+
+
 def test_doctor_runs():
     assert agctl.main(["doctor"]) == 0

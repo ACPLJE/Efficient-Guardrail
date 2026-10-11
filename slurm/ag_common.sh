@@ -4,10 +4,13 @@
 set -euo pipefail
 
 AG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ -f "${AG_ROOT}/env/ag.env" ]]; then
-  # shellcheck disable=SC1091
-  source "${AG_ROOT}/env/ag.env"
+AG_ENV_FILE="${AG_ENV_FILE:-${AG_ROOT}/env/ag.env}"
+_ag_out_pre="${AG_OUT:-}"          # set by the job script (agctl --out); must win over env/ag.env
+if [[ -f "${AG_ENV_FILE}" ]]; then
+  # shellcheck disable=SC1090
+  source "${AG_ENV_FILE}"
 fi
+if [[ -n "${_ag_out_pre}" ]]; then AG_OUT="${_ag_out_pre}"; fi
 
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1

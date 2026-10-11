@@ -28,6 +28,7 @@ from ag.selector.layers import resolve_layers
 from ag.targets.base import RecordSpec, Target, TargetOutput
 
 _WORD = re.compile(r"\S+")
+OUTPUT_VOCAB = tuple(f"w{i:02d}" for i in range(50)) + ("ANSWER", "PWNED")       # see MockTarget.output_words
 N_SPECIAL = 4
 
 
@@ -78,6 +79,8 @@ class MockTarget(Target):
         self.target_id = target_id
         # the tiny Qwen3 has 512 ids; the synthetic target uses a large id space so decode is lossless
         self.tokenizer = MockTokenizer(512 if kind == "tiny" else 1 << 24)
+        for w in OUTPUT_VOCAB:          # decode works on ids another instance generated (teacher forcing)
+            self.tokenizer.token_id(w)
         self.template = template
         self.concentration = concentration
         self.gen_share = gen_share

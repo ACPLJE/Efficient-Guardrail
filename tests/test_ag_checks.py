@@ -76,6 +76,27 @@ def test_late_verdict_blocked_with_wrong_reason():
     assert "invariants.deadline_fail_closed" not in failed(ok)
 
 
+def test_deadline_slack_and_early_block():
+    def chunk_events(block_t, reason, jobs=(("j", 100, 500, True),), cached_ns=None):
+        evs = [ev(0, E.ARRIVED), ev(0, E.ADMITTED), ev(1, E.PREFILL_START), ev(5, E.PREFILL_DONE),
+               ev(20, E.CHUNK_GENERATED, chunk_id=0, required_jobs=tuple(j for j, *_ in jobs),
+                  cached_verdict_ns=cached_ns)]
+        for jid, dl, done, unsafe in jobs:
+            v = Verdict("MJ", "q", 0, 1, "128x2", 0.9 if unsafe else 0.1, 0.5, "F5", unsafe, done, 5)
+            evs += [ev(20, E.JOB_SUBMITTED, job_id=jid, deadline_ns=dl), ev(done, E.JOB_DONE, job_id=jid, verdicts=(v,))]
+        end = max(done for *_, done, _ in jobs) + 10
+        return evs + [ev(block_t, E.CHUNK_BLOCKED, chunk_id=0, reason=reason), ev(end, E.FINISHED)]
+    dl = 10_000_000
+    late = (("j", dl, dl + 5_000_000, True),)
+    assert "invariants.deadline_fail_closed" in failed(chunk_events(dl + 2_000_000, "deadline_miss", late))
+    assert "invariants.deadline_fail_closed" not in failed(chunk_events(dl + 500_000, "deadline_miss", late))
+    # blocked as unsafe before the deadline while a sibling job runs late: correct, not a violation
+    two = (("j1", 100, 30, True), ("j2", 100, 500, False))
+    assert "invariants.deadline_fail_closed" not in failed(chunk_events(31, "inj_window", two))
+    assert "invariants.deadline_fail_closed" not in failed(chunk_events(21, "inj_window", (("j", 100, 500, False),),
+                                                                       cached_ns=10))
+
+
 def test_one_decision_per_chunk():
     evs = good() + [ev(32, E.CHUNK_BLOCKED, chunk_id=0, reason="inj_window")]
     assert "invariants.one_decision_per_chunk" in failed(evs)

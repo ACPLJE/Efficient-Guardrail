@@ -412,7 +412,7 @@ class Event:
 ```
 
 - **정렬 키**는 `(t_ns, request_id, type, chunk_id or -1, job_id or "", seq)`다. seq는 마지막 수단이다.
-- **`payload` 키 관례** (v1.3, S1): `CHUNK_GENERATED.payload`에 `selected`(그 chunk에서 고른 창 목록)와 `cached_windows`(cache로 답한 창), `REQUEST_BLOCKED.payload`에 생성 전 판정의 `selected`, `CHUNK_RELEASED`·`CHUNK_DELIVERED.payload`에 `text`(sink로 나가는 chunk 텍스트, openai_front가 스트리밍에 쓴다), `FINISHED.payload["prompt"]`에 `{n_tokens, n_blocks, n_windows, n_eligible, payload_windows, payload_windows_per_site, payload_rule}`(하네스가 `outcomes_run`에 옮긴다). 지표 함수는 `payload`의 모르는 키를 무시한다.
+- **`payload` 키 관례** (v1.3, S1): `CHUNK_GENERATED.payload`에 `selected`(그 chunk에서 고른 창 목록)와 `cached_windows`(cache로 답한 창), `REQUEST_BLOCKED.payload`에 생성 전 판정의 `selected`, `CHUNK_RELEASED`·`CHUNK_DELIVERED.payload`에 `text`(sink로 나가는 chunk 텍스트, openai_front가 스트리밍에 쓴다), `FINISHED.payload["prompt"]`에 `{n_tokens, n_blocks, n_windows, n_eligible, payload_windows, payload_windows_per_site, payload_rule}`(하네스가 `outcomes_run`에 옮긴다). cache hit은 job을 만들지 않으므로 `CHUNK_GENERATED`·`REQUEST_BLOCKED.payload`에 `cached_unsafe_windows`(cache가 unsafe로 답한 창; `block_reasons`와 FPR(inj)에 들어간다)와 `window_spec`(판정 창 명세)도 싣는다. 지표 함수는 `payload`의 모르는 키를 무시한다.
 
 ### 3.3 누가 무엇을 내는가
 
@@ -625,6 +625,7 @@ def select(window_scores: np.ndarray, cfg: SelectorConfig, *, oracle: Sequence[i
 def union_select(per_scorer: Sequence[np.ndarray], cfg: SelectorConfig) -> tuple[int, ...]: ...    # top-k of each, then union
 ```
 
+- **이름 붙은 층 지정**(`tracked8`, `upper_half`, `last`, `all`)은 언제나 타깃의 층 수와 층 종류로 해석한다(v1.3). Record는 자기를 쓴 층 지정을 담지 않으므로 Record의 층 id 목록을 타깃 목록으로 보지 않는다. 층 정보 없이 이름 붙은 지정을 쓰면 오류다.
 - **층 선택** (D-031): L은 `layer_attn_kind = "full"`인 층의 목록이다(T4는 sliding 층을 뺀 12개, D-037). `upper_half` = 그 목록의 뒤쪽 절반. `tracked8` = `upper_half`에서 균등 간격 8개 `U[round(i·(|U|−1)/7)]`, i = 0…7. `last` = 마지막 층. 타깃별 결과 층 목록을 `configs/targets/*.yaml`에 적는다. 집계 A = `upper_half` + uniform, 집계 B = `upper_half` + learned, 집계 C = `tracked8` + uniform. G0는 C로 본다(계획서 8.2).
 - **학습 가중(집계 B)**은 head별 질량이 필요하므로 Record의 `chunk_head_mass`가 있는 표준 chunk 3종에서만 쓴다. 서빙 chunk와 E6.1의 chunk sweep에는 집계 A·C만 쓴다. `chunk_head_mass`는 t ≥ 1 행의 평균이므로 `head_weighting = learned`면 `first_token = skip`이어야 한다(검증 규칙, 9.1).
 - **`mass_threshold`** (v1.3, S1 정의, D-039 열림): 순위대로 창을 더해 순위 대상 창의 양수 점수 합에서 차지하는 몫이 처음으로 `mass_tau` 이상이 되는 최소 접두사를 고른다. 계획서는 정의를 두지 않았고 E6.1이 top-k와 비교한다.
@@ -1026,7 +1027,7 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 - **latest.txt 자격**(이 한 곳에서만 정의): `clock = "monotonic"` ∧ `code_dirty = false` ∧ 엔진이 `mock`이 아님 ∧ `checks.json`이 모두 ok. plots는 기본값으로 이 자격이 없는 run을 거부한다.
 - 쓰기는 모두 tmp 파일 + `os.replace`, JSONL은 락 하나로 줄 단위 append 후 flush. writer는 `ag/harness/writer.py`의 자체 구현이다(행마다 `run_id`, `schema_version`).
 - plots는 `request_id`로 `raw/data/<sha>/requests.jsonl`과 join해 `background_tier`, `source` 같은 속성을 가져온다.
-- **resume**: 같은 `run_id`로 다시 실행하면 기존 `lineage.json`과 resume 키(7.2)를 비교해 다르면 exit 2로 끝낸다. 같으면 `FINISHED` 또는 fatal `ERROR`가 이미 있고 `outcomes_run.jsonl` 행도 있는 `request_id`만 건너뛴다(v1.3). 충돌로 남은 행 파일의 끊긴 마지막 줄은 이어 쓰기 전에 잘라 낸다(`raw/index.jsonl`처럼 여러 job이 함께 쓰는 파일은 제외). `--ts`로 같은 expand를 다시 부를 때 다시 펼친 run_id 목록이 `raw/<E>/jobs/<ts>.jsonl`과 다르면(설정이나 `--clock`이 바뀜) exit 2로 끝낸다(v1.3). 끊긴 요청은 `attempt`를 올려 다시 하고, 이전 attempt의 부분 이벤트는 지표에서 뺀다. offline 파일은 `(request_id, variant_id)`로 건너뛴다.
+- **resume**: 같은 `run_id`로 다시 실행하면 기존 `lineage.json`과 resume 키(7.2)를 비교해 다르면 exit 2로 끝낸다. 같으면 `FINISHED` 또는 fatal `ERROR`가 이미 있고 `outcomes_run.jsonl` 행도 있는 `request_id`만 건너뛴다(v1.3). 충돌로 남은 행 파일의 끊긴 마지막 줄은 완료 판정 전에 잘라 낸다. 줄바꿈만 빠진 완전한 JSON 행은 지우지 않고 줄바꿈을 붙인다(`raw/index.jsonl`처럼 여러 job이 함께 쓰는 파일은 손대지 않는다). `--ts`로 같은 expand를 다시 부를 때 다시 펼친 run_id 목록이 `raw/<E>/jobs/<ts>.jsonl`과 다르면(설정이나 `--clock`이 바뀜) exit 2로 끝낸다(v1.3). 새 expand(`--ts` 없음, agctl 포함)는 이미 jobs 파일이 있는 시각을 쓰지 않는다. job 스크립트가 export한 `AG_OUT`은 `env/ag.env`보다 우선한다. 끊긴 요청은 `attempt`를 올려 다시 하고, 이전 attempt의 부분 이벤트는 지표에서 뺀다. offline 파일은 `(request_id, variant_id)`로 건너뛴다.
 
 ### 7.2 lineage.json
 
@@ -1066,7 +1067,7 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 ### 7.4 summary.json, checks.json, numbers.json
 
 - `summary.json`: 지표 이름(names enum) → `{value, n, ci_low, ci_high, unit}`. 운영점별 임계값과 "도달 불가" 표시, ROC, 해결된 SLO 임계값, 시스템 info, 고른 variant_id(예: B1a의 창 체계), 실제/trace 입력 토큰 비.
-- `checks.json`: `[{name, ok, detail}]`. 예: `invariants`, `no_release_before_verdict`, `chunk_without_verdict`, `held_chunks_at_end == 0`, `judge_queue_empty`, `no_traceback_in_logs`, `shim_active_matches_system`, `fairness_knobs_equal`, `client_wait_bounded`, `b1a_b1c_same_judge`. v1.3(S1 구현): `invariants.one_decision_per_chunk`(chunk마다 release·block 결정은 많아야 하나), `all_requests_have_outcomes`(요청마다 `outcomes_run` 행), `invariants.deadline_fail_closed`는 release된 chunk뿐 아니라 마감을 넘긴 chunk가 마감 + 1 ms 안에 `reason = deadline_miss`로 block됐는지도 본다.
+- `checks.json`: `[{name, ok, detail}]`. 예: `invariants`, `no_release_before_verdict`, `chunk_without_verdict`, `held_chunks_at_end == 0`, `judge_queue_empty`, `no_traceback_in_logs`, `shim_active_matches_system`, `fairness_knobs_equal`, `client_wait_bounded`, `b1a_b1c_same_judge`. v1.3(S1 구현): `invariants.one_decision_per_chunk`(chunk마다 release·block 결정은 많아야 하나), `all_requests_have_outcomes`(요청마다 `outcomes_run` 행), `invariants.deadline_fail_closed`는 release된 chunk뿐 아니라 마감을 넘긴 chunk가 마감 + 1 ms 안에 `reason = deadline_miss`로 block됐는지도 본다. 마감 전에 다른 판정(unsafe)으로 block된 chunk는 사유와 관계없이 통과다.
 - `numbers.json`(초록 수치 7개, 계획서 9.3): `{ "abs1": {value, unit, ci, tag: "측정", source_run_ids, code_commit, target_id}, … }`. `plots/abstract_numbers.py`만 쓴다(`plots/numbers.py`라는 이름은 `python plots/<script>.py`로 실행할 때 표준 라이브러리 `numbers`를 가려 numpy import를 깨뜨리므로 쓰지 않는다). 초록 7의 분모는 타깃별 창 수(D-014)다.
 
 ## 8. 설정 (YAML)

@@ -111,9 +111,10 @@ def _check_request(rid: str, evs: list[Event], flags: Mapping[str, Any]) -> dict
             dl = min(t for _, t in late)
             if j in rel:
                 fail("invariants.deadline_fail_closed", f"chunk {j} released on {late[0][0]} after its deadline")
-            elif j in blk and (blk[j].reason != "deadline_miss" or blk[j].t_ns > dl + DEADLINE_SLACK_NS):
-                fail("invariants.deadline_fail_closed",
-                     f"chunk {j} missed its deadline but was blocked with reason={blk[j].reason!r} at {blk[j].t_ns}")
+            elif j in blk and blk[j].t_ns >= dl:     # a block before the deadline is fine whatever its reason
+                if blk[j].reason != "deadline_miss" or blk[j].t_ns > dl + DEADLINE_SLACK_NS:
+                    fail("invariants.deadline_fail_closed", f"chunk {j} passed its deadline {dl} and was blocked "
+                                                            f"with reason={blk[j].reason!r} at {blk[j].t_ns}")
 
     # 7. exactly one terminal event; 8. FINISHED after all JOB_DONE
     fin = [e for e in evs if e.type == E.FINISHED]

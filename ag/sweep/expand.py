@@ -120,11 +120,34 @@ def _link_parents(jobs: Sequence[Job]) -> list[Job]:
     return sorted(out, key=lambda j: 0 if not j.parent_run_ids else 1)
 
 
+def fresh_ts(jobs_dir: str | Path, *, sleep=time.sleep) -> str:
+    """A new expand timestamp: never one that already has a jobs file (another expand of the same
+    exp_id in the same second would otherwise share it). Waits for the next second."""
+    jobs_dir = Path(jobs_dir)
+    while True:
+        ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        if not (jobs_dir / f"{ts}.jsonl").exists():
+            return ts
+        sleep(1.0)
+
+
+class JobsFileMismatch(ValueError):
+    pass
+
+
 def write_jobs(out_root: str | Path, jobs: Sequence[Job], ts: str) -> Path | None:
+    """Write raw/<E>/jobs/<ts>.jsonl once. Array tasks re-expand with the same ts and find the file;
+    run_ids that differ from it (config or flags changed since expand) raise JobsFileMismatch."""
     if not jobs:
         return None
     path = Path(out_root) / "raw" / jobs[0].exp_id / "jobs" / f"{ts}.jsonl"
-    if path.exists():           # written once per expand; array tasks re-expand with the same ts
+    if path.exists():
+        from ag.harness.writer import read_rows
+        want = [r["run_id"] for r in read_rows(path)]
+        got = [j.run_id for j in jobs]
+        if want != got:
+            raise JobsFileMismatch(f"run_ids differ from {path} (config or --clock changed since expand):\n"
+                                   f"  expanded: {got}\n  jobs file: {want}")
         return path
     with JsonlWriter(path, run_id="") as w:
         for j in jobs:

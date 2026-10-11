@@ -1,6 +1,0 @@
-# Overlay example (SPEC 8.2): blocking all-window judging before generation, on the mock stack.
-base: mock_ag.yaml
-system_id: B1a
-override:
-  block_before_generation: true
-  selector: { rule: all }

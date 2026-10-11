@@ -1,6 +1,0 @@
-base: mock_ag.yaml
-override:
-  mock:
-    judge:
-      false_positive_rate: 0.15
-system_id: AG

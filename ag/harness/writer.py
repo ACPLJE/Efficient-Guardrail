@@ -45,7 +45,18 @@ def drop_partial_tail(path: Path) -> int:
     with open(path, "r+b") as f:
         data = f.read()
         keep = data.rstrip(b"\x00")
-        cut = len(keep) if keep.endswith(b"\n") else keep.rfind(b"\n") + 1
+        if keep.endswith(b"\n"):
+            cut = len(keep)
+        else:
+            start = keep.rfind(b"\n") + 1
+            try:                                # a complete row that only lost its newline is kept
+                json.loads(keep[start:])
+                f.truncate(len(keep))
+                f.seek(len(keep))
+                f.write(b"\n")
+                return 0
+            except ValueError:
+                cut = start
         if cut != len(data):
             f.truncate(cut)
         return len(data) - cut

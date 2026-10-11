@@ -1,5 +1,0 @@
-# Overlay example (SPEC 8.2): release before verdict (B1b / N5 shape) on the mock stack.
-base: mock_ag.yaml
-system_id: B1b
-override:
-  release_before_verdict: true

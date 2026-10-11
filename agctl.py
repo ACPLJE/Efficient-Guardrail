@@ -17,7 +17,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -63,7 +62,7 @@ def _sbatch(args: list[str]) -> subprocess.CompletedProcess:
 def cmd_run(a: argparse.Namespace) -> int:
     from ag.config.schema import load_exp
     from ag.harness.run import main as run_main
-    from ag.sweep.expand import expand, write_jobs
+    from ag.sweep.expand import expand, fresh_ts, write_jobs
 
     out = a.out or os.environ.get("AG_OUT", "results")
     if not a.sbatch:
@@ -71,7 +70,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         return run_main(argv)
 
     exp = load_exp(a.config)
-    ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    ts = fresh_ts(Path(out) / "raw" / exp["exp_id"] / "jobs")
     jobs = expand(exp, ts=ts, clock=a.clock)
     write_jobs(out, jobs, ts)
     slurm = exp.get("slurm") or {}

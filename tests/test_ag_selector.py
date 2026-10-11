@@ -4,8 +4,8 @@ import pytest
 
 from ag.data.types import ChunkInfo, LedgerRecord
 from ag.selector.layers import resolve_layers
-from ag.selector.select import (SelectorConfig, chunk_block_mass, payload_rank, random_hit_prob, select,
-                                union_select)
+from ag.selector.select import (SelectorConfig, chunk_block_mass, payload_rank, random_hit_prob,
+                                record_layer_index, select, union_select)
 
 
 def test_layer_specs():
@@ -31,9 +31,9 @@ def _record(T=10, L=4, NB=5, hot_block=3, hot_layer=3):
 def test_chunk_block_mass_aggregates():
     rec = _record()
     c = ChunkInfo(0, 0, 8)
-    m_c = chunk_block_mass(rec, c, SelectorConfig(layers="tracked8"))      # 4 layers -> upper half [2, 3]
+    m_c = chunk_block_mass(rec, c, SelectorConfig(layers="tracked8"), n_target_layers=4)   # upper half [2, 3]
     assert np.argmax(m_c) == 3
-    m_last = chunk_block_mass(rec, c, SelectorConfig(layers="last"))
+    m_last = chunk_block_mass(rec, c, SelectorConfig(layers="last"), n_target_layers=4)
     assert m_last[3] == pytest.approx(0.6)
     with_first = chunk_block_mass(rec, c, SelectorConfig(layers=(0,), first_token="include"))
     assert with_first[0] > chunk_block_mass(rec, c, SelectorConfig(layers=(0,)))[0]
@@ -53,8 +53,17 @@ def test_named_layers_need_target_info_on_partial_records():
     import dataclasses
     rec = dataclasses.replace(_record(L=4), layers=np.array([4, 5, 6, 7], dtype=np.int16))   # tracked8 of 8
     c = ChunkInfo(0, 0, 8)
-    with pytest.raises(ValueError, match="layers='all'"):
+    with pytest.raises(ValueError, match="needs n_target_layers"):
         chunk_block_mass(rec, c, SelectorConfig(layers="tracked8"))
+    lead = dataclasses.replace(_record(L=4), layers=np.array([0, 1, 2, 3], dtype=np.int16))   # leading 4 of 8
+    with pytest.raises(ValueError, match="needs n_target_layers"):
+        chunk_block_mass(lead, c, SelectorConfig(layers="tracked8"))
+    with pytest.raises(ValueError, match="not in the Record"):
+        chunk_block_mass(lead, c, SelectorConfig(layers="tracked8"), n_target_layers=8)
+    kinds = ["sliding" if i % 2 == 0 else "full" for i in range(8)]
+    full8 = dataclasses.replace(_record(L=8), layers=np.arange(8, dtype=np.int16))
+    idx = record_layer_index(full8, SelectorConfig(layers="upper_half"), n_target_layers=8, attn_kind=kinds)
+    assert idx.tolist() == [5, 7]                                      # sliding layers excluded (D-037)
     m = chunk_block_mass(rec, c, SelectorConfig(layers="tracked8"), n_target_layers=8)
     assert np.allclose(m, chunk_block_mass(rec, c, SelectorConfig(layers=(4, 5, 6, 7))))
     with pytest.raises(ValueError, match="not in the Record"):

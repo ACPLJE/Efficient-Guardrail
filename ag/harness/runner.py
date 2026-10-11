@@ -27,7 +27,7 @@ from ag.harness.context import RunContext, make_clock
 from ag.harness.checks import Check
 from ag.harness.events import Event, EventType as E, JobKind, event_from_row
 from ag.harness.lineage import build_lineage, close_lineage, open_lineage
-from ag.harness.writer import JsonlWriter, atomic_write_json, atomic_write_text, read_rows
+from ag.harness.writer import JsonlWriter, atomic_write_json, atomic_write_text, drop_partial_tail, read_rows
 from ag.metrics.score import score_outcomes
 from ag.reference.record import RecordStore
 from ag.sweep.expand import Job
@@ -82,14 +82,15 @@ def outcome_run_row(req: Request, evs: Sequence[Event]) -> dict[str, Any]:
                     judged.add(v.window_id)
                     uncached.add(v.window_id)
                     calls += 1
-        elif e.type == E.CHUNK_GENERATED:
+        elif e.type in (E.CHUNK_GENERATED, E.REQUEST_BLOCKED):
+            # cache hits create no job: their windows, unsafe verdicts and spec travel in the payload
             judged.update(e.payload.get("cached_windows", ()))
+            if e.payload.get("cached_windows") and e.payload.get("window_spec"):
+                specs.add(e.payload["window_spec"])
+            if e.payload.get("cached_unsafe_windows"):
+                reasons.append(JOB_REASON[JobKind.INJ_JUDGE])
             if "selected" in e.payload:
-                selected[e.chunk_id] = list(e.payload["selected"])
-        elif e.type == E.REQUEST_BLOCKED:
-            judged.update(e.payload.get("cached_windows", ()))
-            if "selected" in e.payload:
-                selected[-1] = list(e.payload["selected"])
+                selected[e.chunk_id if e.type == E.CHUNK_GENERATED else -1] = list(e.payload["selected"])
     prompt = dict(fin.payload.get("prompt", {})) if fin else {}
     return {
         "request_id": req.request_id, "variant_id": "live", "is_attack": req.is_attack,
@@ -203,6 +204,8 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
                         model_sha={}, data_manifest_sha=sha, engine_version=flags.get("engine", "mock"),
                         threshold_ids=[jr.get("operating_point", "F5")], parent_run_ids=job.parent_run_ids)
     events_path = run_dir / "events.jsonl"
+    for p in (events_path, run_dir / "outcomes_run.jsonl"):     # repair crash-left tails before deciding what is done
+        drop_partial_tail(p)
     done, attempt = _done_requests(events_path) if (run_dir / "lineage.json").exists() else (set(), 0)
     # a request counts as done only with both its terminal event and its outcomes_run row (a kill
     # between the two re-runs it with attempt + 1; by_request keeps the latest attempt)

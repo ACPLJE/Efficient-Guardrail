@@ -78,8 +78,14 @@ class MockSystem(System):
         fair = dict(exp.get("fairness", {}))
         self.max_new = int(fair.get("max_new_tokens", 64))
         self.chunking = ChunkingConfig(**dict(f.get("chunking", exp.get("chunking", {}))))
-        self.record_spec = RecordSpec(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in rec.items()}) \
-            if (rec and self.gate == "none" and f.get("write_records", True)) else None
+        self.record_spec = None
+        if rec and self.gate == "none" and f.get("write_records", True):
+            kw = {k: (tuple(v) if isinstance(v, list) else v) for k, v in rec.items()}
+            kw.setdefault("split_tokens", self.target.split_tokens)
+            if kw["split_tokens"] != self.target.split_tokens:
+                raise ValueError(f"record.split_tokens={kw['split_tokens']} != mock target split_tokens="
+                                 f"{self.target.split_tokens}")
+            self.record_spec = RecordSpec(**kw)
         self.t_source = "virtual" if ctx.clock.kind == "virtual" else ("client" if self.gate == "none" else "engine")
         if self.gate == "ag":
             sel = dict(f.get("selector", {}))
@@ -230,14 +236,17 @@ class MockSystem(System):
         pre_job, pre_done, pre_cached = None, None, None
         pre_wins: tuple[int, ...] = ()
         pre_cached_w: list[int] = []
+        pre_cached_unsafe: list[int] = []
         if self.bbg:   # judge before generation; chunk 0 carries the job, later chunks are exempt
             # no ledger exists before prefill: only rules that do not need it (setup() enforces this)
             pre_wins = select(_eligible_scores(rp), self.selector, oracle=rp.payload_windows, key=req.request_id)
             pre_job, pre_done, pre_cached, vs, pool_free = self._judge(tl, req, rp, None, pre_wins, t0, pool_free,
                                                                        att, deadline_ns=None)
             pre_cached_w = [v.window_id for v in vs if v.cached]
+            pre_cached_unsafe = [v.window_id for v in vs if v.cached and v.unsafe]
             t_ok = max(x for x in (t0, pre_done, pre_cached) if x is not None)
-            sel_payload = {"selected": list(pre_wins), "cached_windows": pre_cached_w}
+            sel_payload = {"selected": list(pre_wins), "cached_windows": pre_cached_w,
+                           "cached_unsafe_windows": pre_cached_unsafe, "window_spec": self.window_spec}
             if any(v.unsafe for v in vs):
                 tl.add(E.REQUEST_BLOCKED, t_ok + self.gate_ns, reason="inj_window", payload=sel_payload, **att)
                 gen = Generation(req.request_id, (), "", "", (), (), True, "inj_window")
@@ -260,12 +269,13 @@ class MockSystem(System):
             gen_chunks.append(c)
             tl.add(E.TOKENS, g, tok_range=(c.tok_start, c.tok_end), **att)
             cached_w: list[int] = []
+            cached_unsafe: list[int] = []
             if self.bbg and c.chunk_id >= 1:
                 job_id, done, cached_ns, vs = None, None, None, []
                 wins: tuple[int, ...] = ()
             elif self.bbg:      # chunk 0 carries the pre-generation job, selection and cache hits
                 job_id, done, cached_ns, vs, wins = pre_job, pre_done, pre_cached, [], pre_wins
-                cached_w = pre_cached_w
+                cached_w, cached_unsafe = pre_cached_w, pre_cached_unsafe
             elif self.rbv and unsafe_at is not None and unsafe_at <= g:
                 # an unsafe verdict is already known: no new job, the chunk is gated by that verdict
                 job_id, done, cached_ns, vs, wins = None, None, unsafe_at, [], ()
@@ -278,9 +288,11 @@ class MockSystem(System):
                     chunk_text=text if self.judge.needs_chunk else None,
                     chunk_ids=tuple(out.output_ids[c.tok_start:c.tok_end]) if self.judge.needs_chunk else None)
             cached_w = cached_w or [v.window_id for v in vs if v.cached]
+            cached_unsafe = cached_unsafe or [v.window_id for v in vs if v.cached and v.unsafe]
             tl.add(E.CHUNK_GENERATED, g, chunk_id=c.chunk_id, tok_range=(c.tok_start, c.tok_end),
                    required_jobs=(job_id,) if job_id else (), cached_verdict_ns=cached_ns,
-                   payload={"selected": list(wins), "cached_windows": cached_w}, **att)
+                   payload={"selected": list(wins), "cached_windows": cached_w,
+                            "cached_unsafe_windows": cached_unsafe, "window_spec": self.window_spec}, **att)
             V = max([x for x in (done, cached_ns) if x is not None], default=None)
             unsafe = any(v.unsafe for v in vs)
             deadline = g + self.release_budget_ns
