@@ -1306,7 +1306,7 @@ SPEC이 기대는 미확인 사실이다. 깨지면 DECISIONS에 적고 묻는�
 - 계산 노드는 외부 네트워크가 없다. 모델·데이터·wheel은 로그인 노드에서 미리 받고 `HF_HUB_OFFLINE=1`(CLAUDE.md 4절).
 - CPU 테스트는 3.11에서 `python -m pytest tests -x -q`와 `pytest $(cat tests/manifests/cpu.txt)` 두 명령으로 돈다. GPU 테스트는 `tests/gpu/`에 두고 CUDA가 없으면 skip한다.
 - (v1.3 S0) 같은 두 명령을 GitHub Actions `.github/workflows/cpu.yml`(Python 3.11, CPU torch, main push와 모든 PR)이 돌리고, 앞에 `tools/check_secrets.py`(추적 파일의 `hf_`·`ghp_` 토큰과 `env/*.env`)와 `tools/check_test_classification.py`를 둔다. `tools/pr_check.sh`는 PR 전 같은 점검에 ruff(`--select F,E9`, AG 경로)와 충돌 표시·절대 경로 grep을 더해 로컬에서 돈다.
-- (v1.3 S0) 모델·데이터는 로그인 노드에서 `bash slurm/ag_download_login.sh [--stage pilot|s2|s3|later|optional|all] [--only NAME,...]`로 받는다(인자 없으면 `pilot,s2`). `$AG_SOURCES`에 자산별 `revision.json`·`probe.json`과 날짜별 `ag_assets_<MMDD>.json`(gated 상태 포함)을 남긴다. HF id 중 확인하지 못한 것은 `verify=True`로 표시했고 첫 다운로드 결과로 확인한다.
+- (v1.3 S0) 모델·데이터는 로그인 노드에서 `bash slurm/ag_download_login.sh [--stage pilot|s2|s3|later|optional|all] [--only NAME,...]`로 받는다(인자 없으면 `pilot,s2`). `$AG_SOURCES`에 자산별 `revision.json`·`probe.json`과 날짜별 `ag_assets_<MMDD>.json`(gated 상태 포함)을 남긴다. HF id 중 확인하지 못한 것은 `verify=True`로 표시했고 첫 다운로드 결과로 확인한다. git clone과 streamed 문서(`hf_stream`)는 임시 디렉터리에 받아 성공했을 때만 기존 사본과 바꾼다(실패한 재다운로드가 pilot이 읽는 `docs.jsonl.gz`를 자르거나 반쯤 받은 clone을 남기지 않음). `revision.json`의 kind·repo_id·url·config·split·max_docs가 registry와 다르면 skip하지 않고 다시 받는다(snapshot의 `registry_mismatch`). 다운로더는 `--sources`를 줘도 `env/ag.env`로 비어 있는 환경 변수(HF_HOME 등)를 채운다.
 
 ## 14. 변경 규칙
 

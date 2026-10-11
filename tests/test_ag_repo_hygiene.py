@@ -260,8 +260,10 @@ def _workflow() -> dict:
 def test_cpu_workflow():
     wf = _workflow()
     on = wf.get("on", wf.get(True))                                  # YAML 1.1 reads the bare key `on` as True
-    assert "push" in on and "pull_request" in on
-    assert wf["concurrency"]["group"] and "cancel-in-progress" in wf["concurrency"]
+    assert on["push"] == {"branches": ["main"]} and "pull_request" in on      # PR branches run once (pull_request)
+    group = wf["concurrency"]["group"]
+    assert "github.sha" in group and "github.event.pull_request.number" in group   # main: one group per commit
+    assert wf["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
     (job,) = wf["jobs"].values()
     assert job["runs-on"] == "ubuntu-latest" and 0 < job["timeout-minutes"] <= 40
     assert {job["env"][k] for k in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE")} == {"1"}
@@ -347,3 +349,15 @@ exit 0
 
     r = run(PYTHON=sys.executable + "-does-not-exist")               # wrong interpreter: refused before any step
     assert r.returncode == 2 and "not Python >= 3.11" in r.stderr and log.read_text() == ""
+
+
+def test_check_secrets_long_line_is_scanned_in_pieces(tmp_path, monkeypatch):
+    """A GB-sized file without newlines must not be read whole; a token across a piece boundary still matches."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_secrets", ROOT / "tools" / "check_secrets.py")
+    C = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(C)
+    monkeypatch.setattr(C, "LINE_PIECE", 64)
+    f = tmp_path / "one_line.txt"
+    f.write_text("a" * 50 + "hf_" + "A" * 34 + "b" * 500 + "\nok\nline3 ghp_" + "x" * 36 + "\n")
+    assert C.scan_file(f) == [(1, "hf_token"), (3, "github_token")]

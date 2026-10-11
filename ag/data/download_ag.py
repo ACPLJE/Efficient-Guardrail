@@ -24,6 +24,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -45,6 +46,12 @@ LOGIN_HOST = "gsai-login-3"
 # kind -> fetch(entry, dst, token) -> {"sha", "local_path", "n_files", "bytes", ...}; a copy so tests can patch it
 FETCHERS: dict[str, Any] = dict(_lgd.FETCHERS)
 PROBE_KINDS = ("github", "hf_dataset", "hf_stream")
+# kinds whose LG fetcher writes its artifact straight into dst: they run in a scratch dir and the artifact replaces
+# the old copy only on success, so a failed (re-)fetch never truncates docs.jsonl.gz or leaves a half clone
+STAGED_ARTIFACT = {"hf_stream": "docs.jsonl.gz", "github": "repo"}
+# a revision.json is reused (skip) only while these fields still match the registry entry
+IDENTITY_FIELDS = ("kind", "repo_id", "url", "config", "split", "max_docs", "text_field", "shuffle_seed",
+                   "allow_patterns", "ignore_patterns")
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
 
 # ----------------------------------------------------------------------------------------------
@@ -59,6 +66,7 @@ SKIP_NAMES = {"package.json", "package-lock.json", "tsconfig.json", "requirement
               "cmakelists.txt", "license.txt", "dataset_infos.json"}
 DATA_DIR_HINTS = {"data", "dataset", "datasets", "benchmark", "benchmarks", "trace", "traces", "eval", "evaluation"}
 MAX_WHOLE_FILE = 64 << 20        # json / yaml parsed whole only below this size
+HEAD_LINE = 1 << 20              # bounded first-line read of an oversized .json
 TRUNC = 200
 
 
@@ -166,12 +174,33 @@ def sample_file(path: Path, rel: str, *, max_rows: int = 50) -> dict:
             out.update(_describe_rows(_jsonl_rows(path, max_rows)))
         elif fmt == ".json":
             if size > MAX_WHOLE_FILE:
-                try:
-                    rows = _jsonl_rows(path, max_rows)          # large .json files are often JSON lines
+                # large .json files are often JSON lines; a one-document file (often a single line) is not loaded
+                with _open_text(path) as f:
+                    head = f.read(TRUNC)
+                    f.seek(0)
+                    first = ""
+                    while not first.strip():
+                        first = f.readline(HEAD_LINE)
+                        if not first or len(first) >= HEAD_LINE:
+                            break
+                # a complete first line that parses means more lines follow (size > MAX_WHOLE_FILE): JSON lines
+                one_doc = not first.strip() or len(first) >= HEAD_LINE or not first.endswith("\n")
+                if not one_doc:
+                    try:
+                        json.loads(first)
+                    except ValueError:
+                        one_doc = True
+                rows = None
+                if not one_doc:
+                    try:
+                        rows = _jsonl_rows(path, max_rows)
+                    except ValueError:
+                        rows = None
+                if rows is not None:
                     out.update(_describe_rows(rows), parsed_as="jsonl")
-                except ValueError:
-                    with _open_text(path) as f:
-                        out.update(skipped=f"{size} bytes > {MAX_WHOLE_FILE}: not parsed", head=f.read(TRUNC))
+                else:
+                    out.update(skipped=f"{size} bytes > {MAX_WHOLE_FILE}: one JSON document or not JSON lines, "
+                                       "not parsed", head=head)
             else:
                 text = path.read_text(encoding="utf-8", errors="replace")
                 try:
@@ -284,8 +313,54 @@ def _count_weights(local: str | None) -> int:
 def _record(e: AGEntry, host: str) -> dict:
     return {"name": e.name, "kind": e.kind, "repo_id": e.repo_id, "config": e.config, "split": e.split,
             "role": e.role, "ag_role": e.ag_role, "stage": e.stage, "verify": e.verify, "gated": e.gated,
-            "max_docs": e.max_docs, "url": e.url, "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "max_docs": e.max_docs, "url": e.url, "text_field": e.text_field, "shuffle_seed": e.shuffle_seed,
+            "allow_patterns": e.allow_patterns, "ignore_patterns": e.ignore_patterns,
+            "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "host": host}
+
+
+def _identity_changes(old: dict, e: AGEntry) -> list[str]:
+    """Fields of a stored revision.json that no longer match the registry entry (e.g. a corrected verify id)."""
+    cur = {k: getattr(e, k) for k in IDENTITY_FIELDS}
+    return [k for k in IDENTITY_FIELDS if k in old and old.get(k) != cur[k]]      # older records lack some keys
+
+
+def _fetch(e: AGEntry, dst: Path, token: str | None) -> dict:
+    """FETCHERS[e.kind], staged for kinds that write into dst (STAGED_ARTIFACT)."""
+    art = STAGED_ARTIFACT.get(e.kind)
+    if art is None:
+        return FETCHERS[e.kind](e, dst, token)
+    for stale in [*dst.glob(".partial-*"), *dst.glob(".old-*")]:     # left by a killed earlier run
+        _remove(stale)
+    tmp, old = dst / f".partial-{os.getpid()}", dst / f".old-{os.getpid()}"
+    tmp.mkdir(parents=True)
+    try:
+        got = dict(FETCHERS[e.kind](e, tmp, token))
+        if not (tmp / art).exists():
+            raise RuntimeError(f"{e.kind} fetcher reported success but wrote no {art}")
+        final = dst / art
+        moved = final.exists() or final.is_symlink()
+        if moved:                                  # renames work on NFS even with files held open by a job
+            os.replace(final, old)
+        try:
+            os.replace(tmp / art, final)
+        except OSError:
+            if moved:
+                os.replace(old, final)
+            raise
+        if got.get("local_path"):
+            got["local_path"] = str(final)
+        return got
+    finally:
+        _remove(tmp)
+        _remove(old)
+
+
+def _remove(p: Path) -> None:
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p, ignore_errors=True)
+    elif p.exists() or p.is_symlink():
+        p.unlink(missing_ok=True)
 
 
 def _read_rev(path: Path) -> dict:
@@ -338,6 +413,7 @@ def snapshot(sources: Path, status: dict[str, dict], *, host: str, run_info: dic
             "id": (e.repo_id or e.url) if e else (r.get("repo_id") or r.get("url")),
             "downloaded_at": r.get("downloaded_at"), "local_path": r.get("local_path"), "error": r.get("error"),
             "in_registry": e is not None,
+            "registry_mismatch": bool(e is not None and r and _identity_changes(r, e)),
         }
     by_stage: dict[str, dict[str, int]] = {}
     for v in entries.values():
@@ -393,7 +469,10 @@ def run(only: Sequence[str] | None = None, stage: str | Sequence[str] | None = N
         for e in entries:
             dst = src / e.name
             old = _read_rev(dst / "revision.json")
-            if skip_existing and old.get("status") == "ok":
+            changed = _identity_changes(old, e) if old.get("status") == "ok" else []
+            if changed:
+                print(f"[refetch] {e.name}: registry changed since the last fetch ({', '.join(changed)})")
+            if skip_existing and old.get("status") == "ok" and not changed:
                 print(f"[skip] {e.name} (revision.json present)")
                 res["skipped"].append(e.name)
                 if probe and e.kind in PROBE_KINDS and not (dst / "probe.json").exists() \
@@ -412,7 +491,7 @@ def run(only: Sequence[str] | None = None, stage: str | Sequence[str] | None = N
                 dst.mkdir(parents=True, exist_ok=True)   # hf_stream writes docs.jsonl.gz before revision.json
                 try:
                     print(f"[fetch] {e.name} <- {e.repo_id or e.url} ({e.kind}, stage {e.stage}) ...", flush=True)
-                    got = FETCHERS[e.kind](e, dst, token)
+                    got = _fetch(e, dst, token)
                     if e.kind == "hf_model" and _count_weights(got.get("local_path")) == 0:
                         raise RuntimeError(f"snapshot {got.get('local_path')} has no weight files "
                                            f"({', '.join(WEIGHT_SUFFIXES)}): check allow/ignore patterns")
@@ -425,7 +504,7 @@ def run(only: Sequence[str] | None = None, stage: str | Sequence[str] | None = N
                     msg = _failure_message(e, ex)
                     print(f"   FAILED {msg}", file=sys.stderr)
                     res["failed"].append(e.name)
-                    if old.get("status") == "ok":     # --no-skip re-fetch failed: the earlier copy is still there
+                    if old.get("status") == "ok" and not changed:   # re-fetch failed: the staged/cached copy is intact
                         rec = {**old, "refetch_error": msg, "refetch_at": rec["downloaded_at"]}
                         print(f"   kept the previous ok record (sha={str(old.get('sha'))[:12]})", file=sys.stderr)
                     else:
@@ -491,9 +570,10 @@ _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _ENV_DEFAULT = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
 
 
-def read_env_file(path: Path = ENV_FILE) -> dict[str, str]:
+def read_env_file(path: Path = ENV_FILE, *, keep_set: bool = False) -> dict[str, str]:
     """`export KEY=VALUE` lines of env/ag.env with $VAR, ${VAR} and ${VAR:-default} expanded against the
-    process environment and earlier lines. Nothing is exported."""
+    process environment and earlier lines. Nothing is exported. keep_set: a key the process already has keeps
+    its value for later expansions (HF_HUB_CACHE=${HF_HOME}/hub follows the shell's HF_HOME)."""
     vals: dict[str, str] = {}
     if not path.exists():
         return vals
@@ -509,7 +589,9 @@ def read_env_file(path: Path = ENV_FILE) -> dict[str, str]:
             val = val[1:-1]
         val = _ENV_DEFAULT.sub(lambda d: look.get(d.group(1)) or d.group(2), val)
         val = re.sub(r"\$\{(\w+)\}|\$(\w+)", lambda v: look.get(v.group(1) or v.group(2), v.group(0)), val)
-        vals[m.group(1)] = look[m.group(1)] = os.path.expanduser(val)
+        vals[m.group(1)] = val = os.path.expanduser(val)
+        if not (keep_set and m.group(1) in os.environ):
+            look[m.group(1)] = val
     return vals
 
 
@@ -540,9 +622,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             flags = " ".join(f for f, on in (("gated", e.gated), ("verify", e.verify)) if on)
             print(f"{e.name:34s} {e.kind:10s} {(e.repo_id or e.url or '-'):58s} {e.stage:8s} {flags:12s} | {e.ag_role}")
         return 0
-    if not (a.sources or os.environ.get("AG_SOURCES")):
-        for k, v in read_env_file().items():      # direct CLI use: env/ag.env fills what the shell did not set
-            os.environ.setdefault(k, v)
+    for k, v in read_env_file(keep_set=True).items():     # env/ag.env fills what the shell did not set (HF_HOME!)
+        os.environ.setdefault(k, v)
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")   # classic HTTP resumes partial blobs (as the wrapper script)
     if a.stage == "all" or (a.only and not a.stage):
         stages = None

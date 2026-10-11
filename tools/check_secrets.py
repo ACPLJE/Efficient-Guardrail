@@ -29,6 +29,8 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("github_pat", re.compile(r"github_pat_[A-Za-z0-9_]{50,}")),
 )
 SNIFF_BYTES = 8192
+LINE_PIECE = 1 << 20          # characters per read of one physical line
+PIECE_OVERLAP = 512          # longer than any token the patterns match in practice
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".venv", "node_modules"}
 
 
@@ -51,12 +53,22 @@ def scan_file(path: Path) -> list[tuple[int, str]] | None:
     try:
         if path.is_symlink() or not path.is_file():
             return None
-        data = path.read_bytes()
+        with open(path, "rb") as f:                     # sniff before reading: untracked files can be GB-sized
+            if b"\0" in f.read(SNIFF_BYTES):
+                return None
+        hits: list[tuple[int, str]] = []
+        lineno, carry = 1, ""
+        with open(path, encoding="utf-8", errors="replace", newline="\n") as f:
+            while piece := f.readline(LINE_PIECE):       # bounded memory even for a GB file with no newline
+                text = carry + piece
+                hits += [(lineno, k) for k, rx in PATTERNS if rx.search(text) and (lineno, k) not in hits]
+                if piece.endswith("\n"):
+                    lineno, carry = lineno + 1, ""
+                else:                                    # same physical line continues: keep an overlap so a
+                    carry = text[-PIECE_OVERLAP:]         # token across the piece boundary still matches
+        return hits
     except OSError:
         return None
-    if b"\0" in data[:SNIFF_BYTES]:
-        return None
-    return list(scan_text(data.decode("utf-8", errors="replace")))
 
 
 def git_toplevel(cwd: Path) -> tuple[Path | None, str]:

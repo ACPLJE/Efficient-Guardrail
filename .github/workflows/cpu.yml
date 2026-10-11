@@ -12,9 +12,10 @@ permissions:
   contents: read
 
 concurrency:
-  # one live run per event type and branch / PR; a newer push cancels the superseded run (main keeps every run)
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # PRs: one live run per PR, a newer push cancels the superseded one. main: one group per commit, so no main
+  # commit is cancelled or dropped from the queue by a later push (every main commit gets a CPU-gate result)
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cpu:

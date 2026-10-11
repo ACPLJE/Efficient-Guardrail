@@ -1,6 +1,6 @@
 #!/bin/bash
 # AG assets on the LOGIN node (gsai-login-3) -- NOT an sbatch script: compute nodes have no network.
-#   bash slurm/ag_download_login.sh                     # every registry entry (ag/data/registry_ag.py)
+# no --stage/--only: stages pilot + s2 (--stage all = every registry entry); see --list
 #   bash slurm/ag_download_login.sh --list              # show the registry (foreground)
 #   bash slurm/ag_download_login.sh --stage pilot       # T2 + bg_wiki_en for the S2 step-0 pilot
 #   bash slurm/ag_download_login.sh --only bg_wiki_en --no-skip

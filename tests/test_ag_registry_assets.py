@@ -24,6 +24,16 @@ from ag.data import registry_ag as R  # noqa: E402
 from lgs1.registry import Entry  # noqa: E402
 
 T1, T2, J1 = "t1_llama31_8b_instruct", "t2_qwen3_4b_instruct_2507", "j1_prompt_guard2_86m"
+
+
+READ_ENV_FILE = D.read_env_file          # the real parser (the autouse fixture below stubs D.read_env_file)
+
+
+@pytest.fixture(autouse=True)
+def _no_env_file(monkeypatch):
+    """main() merges env/ag.env into os.environ; on a checkout that has one (the cluster) that would leak AG_*/HF_*
+    into later tests. Tests that need the merge patch read_env_file themselves."""
+    monkeypatch.setattr(D, "read_env_file", lambda path=None, keep_set=False: {})
 SHA = "abc123def4567890aaaa"
 
 
@@ -341,10 +351,12 @@ def test_read_env_file(tmp_path, monkeypatch):
     f = tmp_path / "ag.env"
     f.write_text("# comment\nexport A=/x            # trailing comment\nexport B=${A}/y\n"
                  "export C=${AG_TEST_UNSET_VAR:-/def}\nD=\"$AG_TEST_HOME/q\"\n")
-    assert D.read_env_file(f) == {"A": "/x", "B": "/x/y", "C": "/def", "D": "/h/q"}
+    assert READ_ENV_FILE(f) == {"A": "/x", "B": "/x/y", "C": "/def", "D": "/h/q"}
     assert "A" not in os.environ
-    ex = D.read_env_file(ROOT / "env" / "ag.env.example")
+    ex = READ_ENV_FILE(ROOT / "env" / "ag.env.example")
     assert ex["AG_SOURCES"] == "/home/212aig08/ag_sources"
+    monkeypatch.setenv("A", "/shell")                 # keep_set: derived values follow the shell's value, as bash would
+    assert READ_ENV_FILE(f, keep_set=True)["B"] == "/shell/y" and READ_ENV_FILE(f)["B"] == "/x/y"
 
 
 # ----------------------------------------------------------------------------------------------
@@ -438,3 +450,184 @@ def test_cli_default_stages(argv, stages, monkeypatch, tmp_path):
     monkeypatch.setattr(D, "run", lambda **kw: seen.update(kw) or {})
     assert D.main([*argv, "--sources", str(tmp_path)]) == 0
     assert seen["stage"] == stages
+
+
+# ----------------------------------------------------------------------------------------------
+# review fixes: staged artifacts, registry changes, oversized JSON probe, env merge
+# ----------------------------------------------------------------------------------------------
+def _stream_failing_after(k: int):
+    """Like lgs1 fetch_hf_stream: opens dst/docs.jsonl.gz for writing first, then the stream dies at row k."""
+    def f(e, dst, token):
+        with gzip.open(dst / "docs.jsonl.gz", "wt", encoding="utf-8") as fh:
+            for i in range(k):
+                fh.write(json.dumps({"id": f"x-{i}", "text": "partial", "meta": {}}) + "\n")
+            raise ConnectionError("stream reset by peer")
+    return f
+
+
+def _n_docs(p: Path) -> int:
+    with gzip.open(p, "rt", encoding="utf-8") as fh:
+        return sum(1 for _ in fh)
+
+
+def test_failed_stream_refetch_keeps_the_previous_file(fakes, monkeypatch):
+    src = fakes / "src"
+    D.run(only=["bg_wiki_en"], sources=src, force_online=True)
+    docs = src / "bg_wiki_en" / "docs.jsonl.gz"
+    assert _n_docs(docs) == 3
+    monkeypatch.setitem(D.FETCHERS, "hf_stream", _stream_failing_after(1))
+    res = D.run(only=["bg_wiki_en"], sources=src, force_online=True, skip_existing=False)
+    assert res["failed"] == ["bg_wiki_en"]
+    assert _n_docs(docs) == 3                                     # the pilot's input was not truncated
+    rev = _read(src / "bg_wiki_en" / "revision.json")
+    assert rev["status"] == "ok" and rev["n_docs"] == 3 and "stream reset" in rev["refetch_error"]
+    assert rev["local_path"] == str(docs) and not list((src / "bg_wiki_en").glob(".partial-*"))
+
+
+def test_failed_first_stream_leaves_no_file_at_the_pilot_path(fakes, monkeypatch):
+    src = fakes / "src"
+    monkeypatch.setitem(D.FETCHERS, "hf_stream", _stream_failing_after(2))
+    D.run(only=["bg_wiki_en"], sources=src, force_online=True)
+    assert _read(src / "bg_wiki_en" / "revision.json")["status"] == "failed"
+    assert not (src / "bg_wiki_en" / "docs.jsonl.gz").exists()
+
+
+def test_github_refetch_is_staged(fakes, monkeypatch):
+    src = fakes / "src"
+    D.run(only=["injecagent"], sources=src, force_online=True)
+    repo = src / "injecagent" / "repo"
+    (repo / "marker").write_text("old")
+    (src / "injecagent" / ".partial-1").mkdir()                    # a killed earlier run left this
+
+    def half_clone(e, dst, token):
+        (dst / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+        raise subprocess.CalledProcessError(128, ["git", "clone"])
+    monkeypatch.setitem(D.FETCHERS, "github", half_clone)
+    D.run(only=["injecagent"], sources=src, force_online=True, skip_existing=False)
+    assert (repo / "marker").read_text() == "old" and (repo / "data" / "cases.jsonl").exists()
+    assert not list((src / "injecagent").glob(".partial-*"))
+    monkeypatch.setitem(D.FETCHERS, "github", fake_github)
+    D.run(only=["injecagent"], sources=src, force_online=True, skip_existing=False)
+    assert not (repo / "marker").exists() and (repo / "data" / "cases.jsonl").exists()   # fresh clone swapped in
+    assert _read(src / "injecagent" / "revision.json")["local_path"] == str(repo)
+
+
+def test_registry_change_forces_refetch(fakes, monkeypatch, capsys):
+    src = fakes / "src"
+    D.run(only=[T2], sources=src, force_online=True)
+    rev_path = src / T2 / "revision.json"
+    rev = _read(rev_path)
+    rev["repo_id"] = "Qwen/Some-Other-Model"                       # as if the registry id was corrected since
+    rev_path.write_text(json.dumps(rev))
+    res = D.run(only=[T2], sources=src, force_online=True)        # default skip_existing=True
+    assert res["attempted"] == [T2] and "registry changed since the last fetch (repo_id)" in capsys.readouterr().out
+    assert _read(rev_path)["repo_id"] == "Qwen/Qwen3-4B-Instruct-2507"
+    rev = _read(rev_path)
+    rev["max_docs"] = 7
+    rev_path.write_text(json.dumps(rev))
+    D.rebuild_status(src)
+    snap = D.snapshot(src, json.loads((src / "download_status.json").read_text()), host="h", run_info={})
+    assert snap["entries"][T2]["registry_mismatch"] is True
+
+
+def test_probe_does_not_load_a_one_line_json_array(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "MAX_WHOLE_FILE", 100)
+    big = tmp_path / "samples.json"
+    big.write_text(json.dumps([{"id": i, "context": "c" * 50} for i in range(20)]))     # one line, > 100 bytes
+    out = D.sample_file(big, "samples.json")
+    assert "not parsed" in out["skipped"] and out["head"].startswith('[{"id": 0')
+    lines = tmp_path / "rows.json"
+    lines.write_text("\n".join(json.dumps({"id": i, "q": "x" * 30}) for i in range(10)) + "\n")
+    out = D.sample_file(lines, "rows.json")
+    assert out["parsed_as"] == "jsonl" and "q" in out["keys"]
+
+
+def test_env_file_fills_hf_home_even_with_sources(monkeypatch, tmp_path):
+    for k in ("HF_HOME", "AG_SOURCES"):          # setenv first so teardown restores the real state (main setdefaults)
+        monkeypatch.setenv(k, "placeholder")
+        monkeypatch.delenv(k)
+    monkeypatch.setattr(D, "read_env_file", lambda path=None, keep_set=False: {"HF_HOME": "/big/disk/hf",
+                                                                                "AG_SOURCES": "/x"})
+    monkeypatch.setattr(D, "run", lambda **kw: {})
+    assert D.main(["--stage", "pilot", "--sources", str(tmp_path)]) == 0
+    assert os.environ["HF_HOME"] == "/big/disk/hf"
+
+
+def _lg_like_github(e, dst, token):
+    """Like lgs1 fetch_github: skips the clone when repo/ exists, then needs a complete checkout."""
+    repo = dst / "repo"
+    if not repo.exists():
+        fake_github(e, dst, token)
+    if not (repo / "README.md").exists():
+        raise subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+    return {"sha": "f00d" * 10, "local_path": str(repo), "n_files": 5, "bytes": 100}
+
+
+def test_first_run_half_clone_does_not_poison_later_runs(fakes, monkeypatch):
+    src = fakes / "src"
+
+    def half_clone(e, dst, token):
+        (dst / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+        raise subprocess.CalledProcessError(128, ["git", "clone"])
+    monkeypatch.setitem(D.FETCHERS, "github", half_clone)
+    D.run(only=["injecagent"], sources=src, force_online=True)
+    assert _read(src / "injecagent" / "revision.json")["status"] == "failed"
+    assert not (src / "injecagent" / "repo").exists()               # nothing half-done at the final path
+    monkeypatch.setitem(D.FETCHERS, "github", _lg_like_github)
+    D.run(only=["injecagent"], sources=src, force_online=True)
+    assert _read(src / "injecagent" / "revision.json")["status"] == "ok"
+
+
+def test_failed_swap_restores_the_old_copy(fakes, monkeypatch):
+    src = fakes / "src"
+    D.run(only=["injecagent"], sources=src, force_online=True)
+    real = os.replace
+
+    def flaky(a, b):
+        if Path(a).parent.name.startswith(".partial-"):
+            raise OSError(16, "Device or resource busy")
+        return real(a, b)
+    monkeypatch.setattr(D.os, "replace", flaky)
+    D.run(only=["injecagent"], sources=src, force_online=True, skip_existing=False)
+    repo = src / "injecagent" / "repo"
+    assert (repo / "README.md").exists() and (repo / "data" / "cases.jsonl").exists()
+    assert not list((src / "injecagent").glob(".old-*")) and not list((src / "injecagent").glob(".partial-*"))
+
+
+def test_changed_entry_with_failed_refetch_is_not_kept_ok(fakes, monkeypatch, capsys):
+    src = fakes / "src"
+    D.run(only=[T2], sources=src, force_online=True)
+    rev_path = src / T2 / "revision.json"
+    rev = _read(rev_path)
+    rev["repo_id"] = "Qwen/Old-Id"
+    rev_path.write_text(json.dumps(rev))
+
+    def down(e, dst, token):
+        raise ConnectionError("hub unreachable")
+    monkeypatch.setitem(D.FETCHERS, "hf_model", down)
+    res = D.run(only=[T2], sources=src, force_online=True)
+    assert _read(rev_path)["status"] == "failed" and res["failed_total"] == [T2]
+    assert "kept the previous ok record" not in capsys.readouterr().err
+
+
+def test_records_without_newer_identity_keys_are_still_skipped(fakes, monkeypatch):
+    src = fakes / "src"
+    D.run(only=[T2, "injecagent", "bg_wiki_en"], sources=src, force_online=True)
+    for name in (T2, "injecagent", "bg_wiki_en"):                   # LG-shaped / older records
+        p = src / name / "revision.json"
+        rev = _read(p)
+        for k in ("url", "max_docs", "text_field", "shuffle_seed", "allow_patterns", "ignore_patterns"):
+            rev.pop(k, None)
+        p.write_text(json.dumps(rev))
+    for kind in ("hf_model", "github", "hf_stream"):
+        monkeypatch.setitem(D.FETCHERS, kind, boom)
+    res = D.run(only=[T2, "injecagent", "bg_wiki_en"], sources=src, force_online=True)
+    assert sorted(res["skipped"]) == sorted([T2, "injecagent", "bg_wiki_en"])
+
+
+def test_probe_reads_json_lines_with_any_row_type(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "MAX_WHOLE_FILE", 100)
+    p = tmp_path / "rows.json"
+    p.write_text("\n" + "\n".join(json.dumps([i, "x" * 40]) for i in range(10)) + "\n")   # leading blank, array rows
+    out = D.sample_file(p, "rows.json")
+    assert out.get("parsed_as") == "jsonl" and out["n_rows_read"] == 10
