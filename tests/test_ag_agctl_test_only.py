@@ -67,12 +67,37 @@ def test_clock_passed_to_array_tasks(tmp_path, fake_sbatch):
     assert run_main(["--config", cfg, "--out", str(out), "--ts", ts, "--clock", "virtual", "--job-index", "0"]) == 2
 
 
+def _frozen_clock(monkeypatch, *stamps):
+    import ag.sweep.expand as X
+    seq = iter(stamps)
+    monkeypatch.setattr(X, "_now_ts", lambda: next(seq))
+    monkeypatch.setattr(X, "_sleep", lambda s: None)
+
+
 def test_fresh_ts_skips_an_existing_expand(tmp_path, monkeypatch):
     import ag.sweep.expand as X
-    seq = iter(["20261011T120000", "20261011T120000", "20261011T120001"])
-    monkeypatch.setattr(X.time, "strftime", lambda fmt, t=None: next(seq))
+    _frozen_clock(monkeypatch, "20261011T120000", "20261011T120001")
     (tmp_path / "20261011T120000.jsonl").write_text("{}\n")
-    assert X.fresh_ts(tmp_path, sleep=lambda s: None) == "20261011T120001"
+    assert X.fresh_ts(tmp_path) == "20261011T120001"
+
+
+def test_same_second_expands_get_distinct_timestamps(tmp_path, monkeypatch, fake_sbatch):
+    from _ag_util import small_exp
+    from ag.harness.run import main as run_main
+    a = small_exp(tmp_path, "a.yaml", systems=["mock_b0"])
+    b = small_exp(tmp_path, "b.yaml", systems=["mock_b0"], fairness={"max_new_tokens": 8})
+    out = tmp_path / "out"
+    jobs = out / "raw" / "mock" / "jobs"
+    # agctl --sbatch: the second render in the same second must not reuse the first jobs file
+    _frozen_clock(monkeypatch, "20261011T120000", "20261011T120000", "20261011T120001")
+    assert agctl.main(["run", "--config", str(a), "--out", str(out), "--sbatch"]) == 0
+    assert agctl.main(["run", "--config", str(b), "--out", str(out), "--sbatch"]) == 0
+    assert sorted(p.name for p in jobs.glob("*.jsonl")) == ["20261011T120000.jsonl", "20261011T120001.jsonl"]
+    # run.py without --ts: same rule
+    _frozen_clock(monkeypatch, "20261011T120001", "20261011T120002", "20261011T120002", "20261011T120003")
+    assert run_main(["--config", str(a), "--out", str(out), "--limit", "1"]) == 0
+    assert run_main(["--config", str(b), "--out", str(out), "--limit", "1"]) == 0
+    assert {"20261011T120002.jsonl", "20261011T120003.jsonl"} <= {p.name for p in jobs.glob("*.jsonl")}
 
 
 def test_write_jobs_refuses_a_different_expand(tmp_path):
@@ -89,14 +114,19 @@ def test_write_jobs_refuses_a_different_expand(tmp_path):
 
 def test_job_script_ag_out_wins_over_env_file(tmp_path):
     import subprocess
+    venv = tmp_path / "venv"                                     # a minimal venv: works under any interpreter
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "activate").write_text("")
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    default = tmp_path / "default"
     env_file = tmp_path / "ag.env"
-    env_file.write_text(f"export AG_OUT=/nonexistent/default\nexport AG_VENV={sys.prefix}\n")
+    env_file.write_text(f"export AG_OUT={default}\nexport AG_VENV={venv}\n")
     mine = tmp_path / "mine"
     r = subprocess.run(["bash", "-c", f'export AG_OUT="{mine}" AG_ENV_FILE="{env_file}"; '
                                       f'source "{ROOT}/slurm/ag_common.sh" >/dev/null; echo "OUT=$AG_OUT"'],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert f"OUT={mine}" in r.stdout and (mine / "logs").is_dir()
+    assert f"OUT={mine}" in r.stdout and (mine / "logs").is_dir() and not default.exists()
 
 
 def test_doctor_runs():

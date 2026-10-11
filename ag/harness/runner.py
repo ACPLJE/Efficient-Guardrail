@@ -204,7 +204,8 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
                         model_sha={}, data_manifest_sha=sha, engine_version=flags.get("engine", "mock"),
                         threshold_ids=[jr.get("operating_point", "F5")], parent_run_ids=job.parent_run_ids)
     events_path = run_dir / "events.jsonl"
-    for p in (events_path, run_dir / "outcomes_run.jsonl"):     # repair crash-left tails before deciding what is done
+    for p in (events_path, run_dir / "outcomes_run.jsonl", run_dir / "records" / "index.jsonl"):
+        # repair crash-left tails of this run's row files before deciding what is done
         drop_partial_tail(p)
     done, attempt = _done_requests(events_path) if (run_dir / "lineage.json").exists() else (set(), 0)
     # a request counts as done only with both its terminal event and its outcomes_run row (a kill

@@ -120,15 +120,23 @@ def _link_parents(jobs: Sequence[Job]) -> list[Job]:
     return sorted(out, key=lambda j: 0 if not j.parent_run_ids else 1)
 
 
-def fresh_ts(jobs_dir: str | Path, *, sleep=time.sleep) -> str:
+def _now_ts() -> str:
+    return time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def fresh_ts(jobs_dir: str | Path) -> str:
     """A new expand timestamp: never one that already has a jobs file (another expand of the same
     exp_id in the same second would otherwise share it). Waits for the next second."""
     jobs_dir = Path(jobs_dir)
     while True:
-        ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        ts = _now_ts()
         if not (jobs_dir / f"{ts}.jsonl").exists():
             return ts
-        sleep(1.0)
+        _sleep(1.0)
 
 
 class JobsFileMismatch(ValueError):

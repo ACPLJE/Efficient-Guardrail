@@ -66,12 +66,37 @@ def test_resume_keeps_complete_row_without_newline(tmp_path, name):
     assert run_main(args) == 0
     d = run_dirs(out)["B0"]
     p = d / name
-    n = len(p.read_text().splitlines())
-    p.write_bytes(p.read_bytes()[:-1])                                # crash just before the last newline
+    original = p.read_bytes()
+    n_events = len((d / "events.jsonl").read_text().splitlines())
+    p.write_bytes(original[:-1])                                      # crash just before the last newline
     assert run_main(args) == 0
     assert _ok(d)
-    assert len(p.read_text().splitlines()) == n
+    assert p.read_bytes() == original                                 # the row was kept, nothing re-ran
+    events = [json.loads(l) for l in (d / "events.jsonl").read_text().splitlines()]
+    assert len(events) == n_events and max(e["attempt"] for e in events) == 0
     assert len((d / "outcomes.jsonl").read_text().splitlines()) == 8
+
+
+def test_resume_repairs_a_partial_record_index_row(tmp_path):
+    # killed during the last request's RecordStore.put: events cut after ADMITTED, no outcome row,
+    # half an index row; the re-run request must append cleanly and scoring must work
+    exp = small_exp(tmp_path, systems=["mock_b0"])
+    out = tmp_path / "out"
+    args = ["--config", str(exp), "--out", str(out), "--ts", "20261011T000004"]
+    assert run_main(args) == 0
+    d = run_dirs(out)["B0"]
+    rows = [json.loads(l) for l in (d / "outcomes_run.jsonl").read_text().splitlines()]
+    last = rows[-1]["request_id"]
+    (d / "outcomes_run.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows[:-1]))
+    evs = [l for l in (d / "events.jsonl").read_text().splitlines()
+           if json.loads(l)["request_id"] != last or json.loads(l)["type"] in ("ARRIVED", "ADMITTED")]
+    (d / "events.jsonl").write_text("\n".join(evs) + "\n")
+    idx = (d / "records" / "index.jsonl").read_text().splitlines()
+    (d / "records" / "index.jsonl").write_text("\n".join(idx[:-1]) + "\n" + idx[-1][:40])
+    assert run_main(args) == 0
+    assert _ok(d)
+    assert len((d / "outcomes.jsonl").read_text().splitlines()) == 8
+    assert (d / "hits.jsonl").exists()
 
 
 def test_resume_reruns_request_without_outcome_row(tmp_path):

@@ -180,6 +180,34 @@ def test_record_split_tokens_reaches_the_target(tmp_path):
     assert idx and all(r["n_blocks"] == -(-r["prompt_len"] // 64) for r in idx)
 
 
+def test_target_only_split_tokens_reaches_the_records(tmp_path):
+    for name in ("mock_b0", "mock_ag"):
+        system_file(tmp_path, f"{name}_64", f"{name}.yaml", "B0" if name == "mock_b0" else "AG",
+                    {"mock": {"target": {"split_tokens": 64}}})
+    sysdir = tmp_path / "systems"
+    exp = small_exp(tmp_path, systems=[str(sysdir / "mock_b0_64.yaml"), str(sysdir / "mock_ag_64.yaml")])
+    assert run_main(["--config", str(exp), "--out", str(tmp_path / "out")]) == 0
+    runs = run_dirs(tmp_path / "out")
+    for sid, d in runs.items():
+        assert checks_ok(d), sid
+        assert all(o["error_kind"] is None for o in rows(d / "outcomes.jsonl")), sid
+    idx = rows(runs["B0"] / "records" / "index.jsonl")
+    assert all(r["n_blocks"] == -(-r["prompt_len"] // 64) for r in idx)
+    assert {h["variant"]["split_tokens"] for h in rows(runs["B0"] / "hits.jsonl")} == {64}
+    att = [o for o in rows(runs["AG"] / "outcomes.jsonl") if o["is_attack"]]
+    assert att and all(o["hit"].get("union") for o in att)          # AG reads the parent's 64-split hits
+
+
+def test_cache_only_requests_keep_their_window_spec(tmp_path):
+    d = run_overlay(tmp_path, "c1", "C1", {"verdict_cache": "global", "block_before_generation": True,
+                                           "selector": {"rule": "random", "k": 1}},
+                    data={"n_attack": 8, "n_benign": 8, "length_classes": ["2k", "8k"]})["C1"]
+    assert checks_ok(d)
+    rs = rows(d / "outcomes_run.jsonl")
+    assert any(r["judged_windows_uncached"] == 0 and r["judged_windows"] > 0 for r in rs)
+    assert {o["judged_windows_spec"] for o in rows(d / "outcomes.jsonl")} == {"128x2"}
+
+
 def test_split_tokens_conflict_fails_at_setup(tmp_path):
     with pytest.raises(ValueError, match="split_tokens"):
         p = system_file(tmp_path, "b0s", "mock_b0.yaml", "B0S", {"mock": {"target": {"split_tokens": 64}}})

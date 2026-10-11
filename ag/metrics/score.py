@@ -39,9 +39,13 @@ def _as_list(x) -> list:
     return list(x) if isinstance(x, (list, tuple)) else [x]
 
 
-def selector_variants(exp: Mapping[str, Any]) -> list[tuple[str, dict, SelectorConfig, list[int]]]:
-    """Offline selector variants of an experiment: one per layer spec; k stays a row column."""
+def selector_variants(exp: Mapping[str, Any], *, split_tokens: int | None = None
+                      ) -> list[tuple[str, dict, SelectorConfig, list[int]]]:
+    """Offline selector variants of an experiment: one per layer spec; k stays a row column.
+    split_tokens: the block size the Records were written with (default: exp.record.split_tokens)."""
     sel = dict(exp.get("selector") or {})
+    if split_tokens is None:
+        split_tokens = int((exp.get("record") or {}).get("split_tokens", 128))
     ks = sorted({int(k) for k in _as_list(sel.get("k", 8))})
     out = []
     for layers in _as_list(sel.get("layers", DEFAULT_LAYERS)):
@@ -50,7 +54,7 @@ def selector_variants(exp: Mapping[str, Any]) -> list[tuple[str, dict, SelectorC
                                  "first_token": sel.get("first_token", "skip"),
                                  "ledger_sample_every": sel.get("ledger_sample_every", 1)},
                     "scorer": "ledger", "chunking": dict(exp.get("chunking") or {}),
-                    "split_tokens": int((exp.get("record") or {}).get("split_tokens", 128))}
+                    "split_tokens": int(split_tokens)}
             cfg = SelectorConfig(rule="topk", k=max(ks), layers=tuple(layers) if isinstance(layers, list) else layers,
                                  head_weighting=hw, first_token=spec["selector"]["first_token"],
                                  ledger_sample_every=spec["selector"]["ledger_sample_every"])
@@ -169,11 +173,12 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
 
     # ---- hits.jsonl from this run's Records (B0 runs record; defended runs reuse the parent's)
     chunking = ChunkingConfig(**dict(job.get("chunking") or {}))
-    variants = selector_variants(job)
+    store = RecordStore(run_dir / "records")
+    first = next(store.iter(), None) if store.index_path.exists() else None
+    variants = selector_variants(job, split_tokens=first.split_tokens if first is not None else None)
     n_layers, attn_kind = target_layers(job)
     hit_rows: list[dict] = []
-    if (run_dir / "records" / "index.jsonl").exists():
-        store = RecordStore(run_dir / "records")
+    if store.index_path.exists():
         for rec in store.iter():
             row = live.get(rec.request_id)
             if row is None or not row.get("payload_windows"):
@@ -183,8 +188,10 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
                                         n_target_layers=n_layers, attn_kind=attn_kind)
         write_rows(run_dir / "hits.jsonl", run_id, hit_rows)
     report_hits = hit_rows if hit_rows or parent_dir is None else read_rows(parent_dir / "hits.jsonl")
-    default_vid = next((vid for vid, spec, _, _ in variants if spec["selector"]["layers"] == DEFAULT_LAYERS
-                        and spec["selector"]["head_weighting"] == "uniform"), variants[0][0] if variants else None)
+    # the reported variants are those of the Records the hits came from (a defended run reads its parent's)
+    specs = {h["variant_id"]: h["variant"] for h in report_hits} or {vid: spec for vid, spec, _, _ in variants}
+    default_vid = next((vid for vid, spec in specs.items() if spec["selector"]["layers"] == DEFAULT_LAYERS
+                        and spec["selector"]["head_weighting"] == "uniform"), next(iter(specs), None))
 
     # ---- outcomes.jsonl
     k_live = int(sysflags.get("selector", {}).get("k", 8)) if not is_b0 else None
@@ -229,9 +236,10 @@ def score_outcomes(run_dir: str | Path, *, n_boot_seed: int = 0) -> dict[str, An
     write_rows(run_dir / "outcomes.jsonl", run_id, outcomes)
 
     summary = summarize(outcomes, report_hits, per, default_vid=default_vid,
-                        ks=variants[0][3] if variants else [8], seed=n_boot_seed, exposed_applicable=not is_b0)
+                        ks=sorted({int(h["k"]) for h in report_hits}) or (variants[0][3] if variants else [8]),
+                        seed=n_boot_seed, exposed_applicable=not is_b0)
     summary["_meta"] = {"run_id": run_id, "s_source_run_id": s_src, "default_variant_id": default_vid,
-                        "variants": {vid: spec for vid, spec, _, _ in variants}, "n_units": len(outcomes),
+                        "variants": specs, "n_units": len(outcomes),
                         "n_S": sum(1 for o in outcomes if o["attack_success_b0"])}
     atomic_write_json(run_dir / "summary.json", summary)
     return summary

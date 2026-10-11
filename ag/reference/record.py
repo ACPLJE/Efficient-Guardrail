@@ -98,8 +98,8 @@ class RecordStore:
     def index(self) -> list[dict]:
         if not self.index_path.exists():
             return []
-        with open(self.index_path, encoding="utf-8") as f:
-            return [json.loads(l) for l in f if l.strip()]
+        from ag.lineage_util import iter_rows      # skips a crash-left partial last line / NUL tail
+        return list(iter_rows(self.index_path))
 
     def _match(self, row: dict, filters: dict) -> bool:
         return all(v is None or row.get(k) == v for k, v in filters.items())
