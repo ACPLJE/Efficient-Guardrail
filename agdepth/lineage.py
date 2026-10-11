@@ -44,7 +44,11 @@ def model_sha_of(repo: str, sha: str) -> str:
 def start(run_dir: Path, run_id: str, exp_id: str, chash: str, *, seed: int, producer: str,
           model_sha: Mapping[str, str], data_manifest_sha: str, parents: Sequence[str] = (), fresh: bool = False):
     """open_lineage; a resume with different resume keys exits with code 2 (CLAUDE.md 3.3)."""
+    import os
     from ag.harness.lineage import LineageMismatch, build_lineage, fail_on_mismatch, open_lineage
+    # lgs4 sets this default on import (model loading); set it here too so env_hash -- a resume key -- does not depend
+    # on whether this process loaded a model (a standalone fit would otherwise always exit 2 after a pipeline run)
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     if fresh:

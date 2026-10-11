@@ -69,6 +69,7 @@ def run(only: Optional[List[str]] = None, with_s1: bool = False, token: Optional
                "host": socket.gethostname(), "by": "agdepth"}
         t0 = time.time()
         dst.mkdir(parents=True, exist_ok=True)
+        D1._write_rev(dst, {**rec, "status": "started"})      # an interrupted fetch is never taken for a finished one
         try:
             print(f"[fetch] {d.name} <- {d.repo_id or ', '.join(d.urls)} ({d.kind})", flush=True)
             if d.kind == "urls":

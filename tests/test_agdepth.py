@@ -434,7 +434,9 @@ def test_fresh_extract_never_inherits_progress(agpaths, tmp_path, monkeypatch):
 def test_sbatch_scripts_use_the_ag_environment(agpaths, tmp_path, monkeypatch):
     import depthctl
     monkeypatch.setenv("AGDEPTH_OUT", str(agpaths.root))
-    (tmp_path / "hub" / "models--Qwen--Qwen3Guard-Gen-0.6B").mkdir(parents=True)     # the reference tokenizer is cached
+    snap = tmp_path / "hub" / "models--Qwen--Qwen3Guard-Gen-0.6B" / "snapshots" / "x"
+    snap.mkdir(parents=True)
+    (snap / "tokenizer.json").write_text("{}")                        # the reference tokenizer is cached
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(depthctl.shutil, "which", lambda name: None)  # no sbatch here: render only
     assert depthctl.main(["run", "--run", "s", "--backbones", "e03", "--dtype", "fp16", "--sbatch"]) == 0
@@ -496,13 +498,89 @@ def test_interrupted_rebuild_leaves_no_stale_card(agpaths, monkeypatch):
 
 
 def test_standalone_fit_shares_the_backbone_lineage(tmp_path, monkeypatch):
+    import subprocess
+    import sys
     import depthctl
     monkeypatch.setenv("LG_ENV_FILE_NO_OVERRIDE", "1")
     depthctl.cmd_smoke(type("A", (), {"dir": str(tmp_path), "n_boot": 2, "primary_fpr": None})())
     run_dir = tmp_path / "out" / "smoke" / "probes" / "tiny-model"
     before = json.loads((run_dir / "lineage.json").read_text())
-    monkeypatch.setenv("AGDEPTH_OUT", str(tmp_path / "out"))
-    assert depthctl.main(["fit", "--run", "smoke", "--backbone", str(tmp_path / "tiny-model"), "--framings", "raw",
-                          "--poolings", "mean", "--device", "cpu"]) == 0
+    # a separate process that never loads a model (the cluster case): env_hash must still match the pipeline run
+    env = {**os.environ, "AGDEPTH_OUT": str(tmp_path / "out")}
+    env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    r = subprocess.run([sys.executable, str(Path(depthctl.__file__)), "fit", "--run", "smoke", "--backbone",
+                        str(tmp_path / "tiny-model"), "--framings", "raw", "--poolings", "mean", "--device", "cpu"],
+                       env=env, capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     after = json.loads((run_dir / "lineage.json").read_text())
     assert after["run_id"] == before["run_id"] and after["finished_unix_ns"] >= before["finished_unix_ns"]
+
+
+# ---------------------------------------------------------------------------------------------- regressions (review 3)
+def test_stratified_draw_reaches_bins_outside_the_item_range():
+    import random
+    from agdepth.windows import BIN, stratified_draw
+    # target: very short snippets; the class only has long ones (every deficit bin lies below all item bins)
+    items = [{"source": "s", "n_tok": BIN * b + 1, "sid": f"{b}-{i}"} for b in (20, 21) for i in range(20)]
+    out = stratified_draw(items, {1: 0.5, 2: 0.5}, 50, 3, random.Random(0))
+    assert len(out) == 50 and all(o["n_tok"] // BIN == 20 for o in out)      # the nearest bin, reused (<= 3 each)
+
+
+def test_heldout_source_is_drawn_on_its_own(agpaths, monkeypatch):
+    from agdepth import sources as S
+    from agdepth.config import PROFILES
+    from agdepth.windows import build, load_card, read_jsonl_gz
+    real = S.collect_snippets
+
+    def with_heldout(*a, **k):                                 # a test_only injection source, like LLMail
+        by, rep = real(*a, **k)
+        extra = [{"source_id": f"h{i}", "text": f"SMOKEINJ held out message number {i} with a few more words.",
+                  "group": f"ho:{i}"} for i in range(40)]
+        by["inj"] += S._dedup_group(extra, "heldout_src", "inj", True, True)
+        return by, rep
+    monkeypatch.setattr(S, "collect_snippets", with_heldout)
+    prof = PROFILES["smoke"]
+    card = build("h", prof, smoke=True, P=agpaths)
+    rows = list(read_jsonl_gz(agpaths.run("h").windows))
+    ho = [r for r in rows if r["test_only"]]
+    gate = [r for r in rows if r["cls"] == "inj" and r["split"] == "test" and not r["test_only"]]
+    assert ho and all(r["split"] == "test" and r["id"].startswith("test-inj-ho-") for r in ho)
+    assert len(gate) == prof.n_test                            # the gate positives keep the full n_test
+    assert "inj" in card["snippet_tokens_heldout"] and load_card(agpaths.run("h"))["data_manifest_sha"]
+
+
+def test_bad_pooling_entry_is_rejected_before_any_file(agpaths, tmp_path):
+    from agdepth import extract
+    from agdepth.config import PROFILES
+    from agdepth.tiny import make_tiny_repo
+    from agdepth.windows import build
+    repo = str(make_tiny_repo(tmp_path / "m"))
+    build("b", PROFILES["smoke"], smoke=True, P=agpaths)
+    M = extract.load(repo, "cpu", "fp32")
+    extract.extract("b", repo, ["raw"], ["mean"], M=M, P=agpaths, budget=4096)
+    D = agpaths.run("b").feats("m", "raw")
+    files = {f.name: f.stat().st_mtime_ns for f in D.iterdir()}
+    for fr, po in ((["raw"], ["mean", ""]), (["raw"], []), (["raw", "chat"], ["mean"])):
+        with pytest.raises(SystemExit):
+            extract.extract("b", repo, fr, po, M=M, P=agpaths, budget=4096)
+    assert {f.name: f.stat().st_mtime_ns for f in D.iterdir()} == files     # the finished features are untouched
+    assert json.loads((D / "meta.json").read_text())["complete"]
+
+
+def test_cli_validation_round3(agpaths, tmp_path, monkeypatch):
+    import depthctl
+    monkeypatch.setenv("AGDEPTH_OUT", str(agpaths.root))
+    monkeypatch.setattr(depthctl.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit):                            # --fresh belongs to pipeline, also with --sbatch
+        depthctl.main(["extract", "--run", "x", "--backbone", "qwen3guard_0.6b", "--fresh", "--sbatch"])
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "qwen3guard_0.6b").mkdir()                     # a same-named directory never shadows a registry key
+    assert depthctl._expand_backbones("qwen3guard_0.6b") == ["qwen3guard_0.6b"]
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty_hub"))
+    (tmp_path / "empty_hub" / "models--Qwen--Qwen3Guard-Gen-0.6B" / "blobs").mkdir(parents=True)
+    with pytest.raises(SystemExit):                            # a partial download has no tokenizer snapshot
+        depthctl.main(["run", "--run", "s", "--backbones", "e03", "--sbatch"])
+    assert depthctl.main(["run", "--run", "s", "--backbones", "e03", "--skip-build", "--sbatch"]) == 0
+    a = type("A", (), {"framings": "raw,,task,raw", "poolings": "mean,", "backbone": None})()
+    depthctl._validate(a)
+    assert (a.framings, a.poolings) == ("raw,task", "mean")

@@ -266,7 +266,8 @@ def stratified_draw(items: List[Dict], hist: Dict[int, float], n: int, max_reuse
                 need -= k
         return need
     distinct, reuse = (lambda x: uniq[x]), (lambda x: uniq[x] * max_reuse)
-    far = max(by_bin) - min(by_bin) + max(deficit or [0]) + 1
+    lo, hi = min([*by_bin, *deficit]), max([*by_bin, *deficit])
+    far = hi - lo                                               # every bin is within reach of every deficit bin
     for b in sorted(deficit):                                   # the tolerance ring first: distinct, then reuse
         deficit[b] = spend(b, deficit[b], distinct, 0, NEAR)
         deficit[b] = spend(b, deficit[b], reuse, 0, NEAR)
@@ -440,19 +441,29 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
     n_by_split = {"train": profile.n_train, "val": profile.n_val, "test": profile.n_test}
     for cls in sorted(by_cls):
         for split in SPLITS:
-            pool = [it for it in by_cls[cls] if it["split"] == split]
-            draws = stratified_draw(pool, hist, n_by_split[split], profile.max_reuse, random.Random(f"{seed}-{cls}-{split}"))
-            if len(draws) < n_by_split[split]:
-                shortfall[f"{cls}/{split}"] = {"want": n_by_split[split], "got": len(draws), "snippets": len(pool)}
-            for j, sn in enumerate(draws):
-                w = make_window(sn, bgs[split], profile.window, rng)
-                if w is None:
-                    shortfall.setdefault(f"{cls}/{split}", {"want": n_by_split[split], "got": len(draws),
-                                                             "snippets": len(pool)})["no_background"] = True
+            pool_all = [it for it in by_cls[cls] if it["split"] == split]
+            # a test_only source (LLMail) is drawn on its own, to the same length histogram, so the in-distribution
+            # windows the gate uses keep the full n_test and their length matching (the held-out set is extra rows)
+            parts = [("", [it for it in pool_all if not it.get("test_only")])]
+            if split == "test" and any(it.get("test_only") for it in pool_all):
+                parts.append(("ho-", [it for it in pool_all if it.get("test_only")]))
+            for tag, pool in parts:
+                if not pool:
                     continue
-                rows.append({"id": f"{split}-{cls}-{j:06d}", "split": split, "cls": cls, "source": sn["source"],
-                             "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"],
-                             "test_only": bool(sn.get("test_only")), "n_tok_snip": sn["n_tok"], **w})
+                key = f"{cls}/{split}" + ("/heldout" if tag else "")
+                draws = stratified_draw(pool, hist, n_by_split[split], profile.max_reuse,
+                                        random.Random(f"{seed}-{cls}-{split}{tag}"))
+                if len(draws) < n_by_split[split]:
+                    shortfall[key] = {"want": n_by_split[split], "got": len(draws), "snippets": len(pool)}
+                for j, sn in enumerate(draws):
+                    w = make_window(sn, bgs[split], profile.window, rng)
+                    if w is None:
+                        shortfall.setdefault(key, {"want": n_by_split[split], "got": len(draws),
+                                                   "snippets": len(pool)})["no_background"] = True
+                        continue
+                    rows.append({"id": f"{split}-{cls}-{tag}{j:06d}", "split": split, "cls": cls, "source": sn["source"],
+                                 "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"],
+                                 "test_only": bool(sn.get("test_only")), "n_tok_snip": sn["n_tok"], **w})
     counts = tok.count([r["text"] for r in rows])
     for r, n in zip(rows, counts):
         r["n_tok"] = int(n)
@@ -489,8 +500,11 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
         "length_hist_target": {str(b * BIN): round(p, 4) for b, p in sorted(hist.items())},
         "windows": {s: dict(Counter(r["cls"] for r in rows if r["split"] == s)) for s in SPLITS},
         "windows_by_source": {c: dict(Counter(r["source"] for r in rows if r["cls"] == c)) for c in sorted(by_cls)},
-        "snippet_tokens": {c: {s: _len_stats([r["n_tok_snip"] for r in rows if r["cls"] == c and r["split"] == s])
+        "snippet_tokens": {c: {s: _len_stats([r["n_tok_snip"] for r in rows
+                                              if r["cls"] == c and r["split"] == s and not r.get("test_only")])
                                for s in SPLITS} for c in sorted(by_cls)},
+        "snippet_tokens_heldout": {c: _len_stats([r["n_tok_snip"] for r in rows if r["cls"] == c and r.get("test_only")])
+                                   for c in sorted(by_cls) if any(r["cls"] == c and r.get("test_only") for r in rows)},
         "window_tokens": _len_stats([r["n_tok"] for r in rows]),
         "bigneg": dict(Counter(r["cls"] for r in big)), "shortfall": shortfall, "audit": audit(rows),
     }

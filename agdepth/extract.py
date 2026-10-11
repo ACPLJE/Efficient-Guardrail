@@ -290,6 +290,9 @@ def extract(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings:
             max_len: Optional[int] = None, device: Optional[str] = None, dtype: Optional[str] = None,
             budget: Optional[int] = None, P: Optional[AGPaths] = None, M: Optional[Dict] = None) -> Dict:
     from .windows import load_card, read_jsonl_gz
+    bad = [f for f in framings if f not in FRAMINGS] + [p for p in poolings if p not in POOLINGS]
+    if bad or not framings or not poolings:                     # before any file is touched
+        raise SystemExit(f"[extract] bad framings/poolings {list(framings)} / {list(poolings)}")
     P = P or AGPaths.load()
     R = P.run(run)
     card = load_card(R)

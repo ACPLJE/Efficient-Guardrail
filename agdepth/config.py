@@ -63,19 +63,20 @@ class AGPaths:
 
 
 def ag_env_value(key: str) -> Optional[str]:
-    """A value from env/ag.env (or $AG_ENV_FILE) as slurm/ag_common.sh would set it; understands `${KEY:-default}`."""
-    import re
+    """The value slurm/ag_common.sh gets for `key` by sourcing env/ag.env (or $AG_ENV_FILE): resolved by bash itself,
+    so ${VAR:-default}, earlier variables, comments and repeated assignments behave exactly as in the job.  None when the
+    file or bash is missing, or the result is not an absolute path."""
+    import subprocess
     f = Path(os.environ.get("AG_ENV_FILE") or Path(__file__).resolve().parent.parent / "env" / "ag.env")
     if not f.exists():
         return None
-    for line in f.read_text(encoding="utf-8").splitlines():
-        m = re.match(rf"^\s*(?:export\s+)?{key}=(.*)$", line.split(" #", 1)[0].strip())
-        if m:
-            v = m.group(1).strip().strip('"').strip("'")
-            d = re.fullmatch(r"\$\{" + key + r":-(.*)\}", v)
-            v = d.group(1) if d else v
-            return os.path.expandvars(os.path.expanduser(v)) or None
-    return None
+    try:
+        r = subprocess.run(["bash", "-c", f'set -a; source "$0" >/dev/null 2>&1; printf %s "${{{key}-}}"', str(f)],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    v = r.stdout.strip()
+    return v if v and "$" not in v and os.path.isabs(v) else None
 
 
 @dataclass

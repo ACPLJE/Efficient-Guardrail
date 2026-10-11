@@ -32,7 +32,8 @@ sys.path.insert(0, str(ROOT))
 
 from lgs1.paths import env  # noqa: E402
 from agdepth.config import (BACKBONE_ALIASES, BACKBONES, BG_DOMAINS, DEFAULT_POOLINGS, FRAMINGS, LAMBDAS,  # noqa: E402
-                            POOLINGS, PROFILES, SNIP_SOURCES, TRAIN_SUBSAMPLE, AGPaths, backbone, is_local_model)
+                            POOLINGS, PROFILES, SNIP_SOURCES, TRAIN_SUBSAMPLE, AGPaths, ag_env_value, backbone,
+                            is_local_model)
 
 TIME = {"build": "04:00:00", "pipeline": "24:00:00", "analyze": "06:00:00"}
 _REPO_ID = re.compile(r"^[A-Za-z0-9][\w.\-]*/[\w.\-]+$")
@@ -54,7 +55,7 @@ def _expand_backbones(spec: str) -> List[str]:
     if bad:
         raise SystemExit(f"[depthctl] unknown backbone(s) {bad}: use {sorted(BACKBONES)}, an alias {sorted(BACKBONE_ALIASES)}, "
                          f"an org/name repo id or a local model directory")
-    return [_abs_if_local(b) for b in dict.fromkeys(out)]
+    return [b if b in BACKBONES else _abs_if_local(b) for b in dict.fromkeys(out)]   # registry keys never become paths
 
 
 def _check_tok(tok: str) -> None:
@@ -66,9 +67,10 @@ def _check_tok(tok: str) -> None:
     if not _REPO_ID.match(repo):
         raise SystemExit(f"[depthctl] --tok {tok!r}: use {sorted(TOKENIZERS)}, a local directory or an org/name repo id")
     hub = Path(os.environ.get("HF_HUB_CACHE") or (AGPaths.load().hf_home / "hub"))
-    if not (hub / f"models--{repo.replace('/', '--')}").exists():
-        raise SystemExit(f"[depthctl] --tok {tok!r}: {repo} is not in the HF cache {hub} (jobs run offline); "
-                         f"download it on the login node first")
+    snaps = hub / f"models--{repo.replace('/', '--')}" / "snapshots"
+    if not any(snaps.glob("*/tokenizer*")):                     # a partial download has blobs but no snapshot files
+        raise SystemExit(f"[depthctl] --tok {tok!r}: no tokenizer files for {repo} in the HF cache {hub} (jobs run "
+                         f"offline); download it on the login node first")
 
 
 def _validate(a) -> None:
@@ -78,6 +80,7 @@ def _validate(a) -> None:
             bad = [x for x in vals if x not in allowed]
             if bad or not vals:
                 raise SystemExit(f"[depthctl] --{name} {getattr(a, name)!r}: allowed {list(allowed)}")
+            setattr(a, name, ",".join(dict.fromkeys(vals)))     # no empty or repeated entries reach a job
     if getattr(a, "backbone", None):
         bbs = _expand_backbones(a.backbone)
         if len(bbs) != 1:
@@ -90,9 +93,13 @@ def _validate(a) -> None:
         from agdepth.extract import DTYPES
         if a.dtype not in DTYPES:
             raise SystemExit(f"[depthctl] --dtype {a.dtype!r}: allowed {sorted(DTYPES)}")
-    if getattr(a, "tok", None):
-        a.tok = _abs_if_local(a.tok)
+    if getattr(a, "tok", None) and not getattr(a, "skip_build", False):
+        from lgs2.config import TOKENIZERS
+        if a.tok not in TOKENIZERS and a.tok not in ("whitespace", "ws"):
+            a.tok = _abs_if_local(a.tok)
         _check_tok(a.tok)
+    if getattr(a, "fresh", False) and getattr(a, "cmd", "") in ("extract", "fit", "score"):
+        raise SystemExit("[depthctl] --fresh starts a whole backbone run: use `pipeline --fresh`")
     if hasattr(a, "profile"):
         from agdepth.windows import profile_from_args
         profile_from_args(a)                                  # raises on an inconsistent override
@@ -113,7 +120,7 @@ def _render(P: AGPaths, run: str, name: str, cmd: List[str], time_key: str, cpus
     R = P.run(run)
     R.logs.mkdir(parents=True, exist_ok=True)                 # Slurm cannot open -o in a missing directory
     R.slurm.mkdir(parents=True, exist_ok=True)
-    out = os.environ.get("AG_OUT") or str(P.root)
+    out = os.environ.get("AG_OUT") or ag_env_value("AG_OUT") or str(P.root)
     text = agctl.SBATCH_HEADER.format(name=name, partition=env("AG_PARTITION", "RTX6000ADA"), gres="gpu:1", cpus=cpus,
                                       time=env(f"AG_TIME_{time_key.upper()}", TIME[time_key]), log_dir=str(R.logs),
                                       array_line="", out=out, repo=agctl.REPO)
@@ -306,8 +313,6 @@ def _single(step: str):
         from agdepth import extract, fit, score
         from agdepth import lineage as LN
         fr, po = a.framings.split(","), a.poolings.split(",")
-        if a.fresh:
-            raise SystemExit("[depthctl] --fresh starts a whole backbone run: use `pipeline --fresh`")
         if step == "fit":                                     # same lineage as the pipeline run of this backbone
             dt, sha = _fit_identity(P, a.run, a.backbone)
             lin, run_dir, _ = open_bb_run(P, a.run, a.backbone, dt, sha)
@@ -367,6 +372,7 @@ def cmd_smoke(a):
     from agdepth.config import PROFILES as PR
     from agdepth.tiny import make_tiny_repo
     from agdepth.windows import build
+    _validate(a)
     base = Path(a.dir).expanduser().resolve() if a.dir else Path(tempfile.mkdtemp(prefix="agdepth_smoke_"))
     P = AGPaths.load(root=base / "out")
     shutil.rmtree(P.run("smoke").root, ignore_errors=True)     # only the smoke run's own directory
