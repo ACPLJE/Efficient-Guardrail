@@ -1,0 +1,60 @@
+# CPU gate (CLAUDE.md 3.4; build plan 4.2 S0 / 5): the two pytest commands that keep main green, on Python 3.11
+# (D-001), without GPU or network. GPU tests live in tests/gpu/ and skip without CUDA; GPU differential results are
+# attached to the PR from Slurm runs instead. tools/pr_check.sh runs the same steps locally (plus ruff and greps).
+name: cpu
+
+on:
+  push:
+    branches: [main]     # PR branches run once, through pull_request
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # one live run per event type and branch / PR; a newer push cancels the superseded run (main keeps every run)
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TOKENIZERS_PARALLELISM: "false"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install torch (CPU wheel)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install requirements and the ag package
+        run: |
+          pip install -r requirements.txt
+          pip install -e ".[reference,test]"
+
+      - name: Versions
+        run: python -c "import sys, torch, transformers; print(sys.version); print('torch', torch.__version__, 'transformers', transformers.__version__)"
+
+      - name: No secrets in tracked files
+        run: python tools/check_secrets.py
+
+      - name: Every test module is classified
+        run: python tools/check_test_classification.py
+
+      - name: Full CPU suite
+        run: python -m pytest tests -x -q
+
+      - name: CPU manifest
+        run: pytest $(cat tests/manifests/cpu.txt)

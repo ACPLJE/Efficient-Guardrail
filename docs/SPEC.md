@@ -10,6 +10,7 @@
 
 - v1 (2026-10-10): 첫 초안.
 - v1.3 (2026-10-11): S1 걷는 뼈대 구현에서 SPEC이 정하지 않았던 세부를 적었다. `schema_version`은 1 그대로다(첫 실데이터 기록 전, 14절). NB = 1이면 창 1개(1.1), 이벤트 `payload` 키 관례(3.2), `SystemConfig`(4.2), `mass_threshold`의 S1 정의(4.5, D-039 열림), mock judge의 지연 모형 `Judge.latency_ns`(4.6), `hits.jsonl`·`outcomes_run.jsonl`의 추가 열과 hit 행의 `variant_id`에서 k 제외(7.3), `plots/numbers.py` → `plots/abstract_numbers.py`(7.4). PR 리뷰 반영: `hits.jsonl`에 `source` 열(bootstrap 층화), `config_hash`에서 반복 횟수 `repeats` 제외(8.3), 실행 시 `--ts`의 jobs 파일과 run_id가 다르면 exit 2(7.1), resume는 `outcomes_run` 행까지 있어야 완료로 봄과 끊긴 마지막 줄 정리(7.1), checks 추가(`one_decision_per_chunk`, `all_requests_have_outcomes`, 마감 검사를 block된 chunk까지 확장, 7.4), YAML `off`/`on` 불리언을 enum 문자열로 되돌리고 값 검사, `block_before_generation`은 ledger가 필요 없는 선택 규칙만(9.1), B0의 판정 전 노출 토큰은 `not_applicable`(6.2). 전체 코드 재검증 반영: 동시 `System.run`에서 job id를 요청별로 셈(3.2), 수집기 close 의미(3.5), 3.4 #9의 oracle 예외, index append의 flock(5.4), hit@k 분모는 X 전체(6.1), 오류 단위 집계 `error_units`(6.1·7.4), `latest.txt`에서 `evaluation_only` 제외(7.1), checks 추가(`fairness_knobs_equal`를 expand 직후 비교해 exit 3, `s_source_available`, cache unsafe verdict로 release한 chunk, 7.4·8.3), `sweep.include` 구현(8.1), 실험 파일의 `clock`·`success_judge`·`data.generator`·`data.source`·`data.sink`·`data.seed` 키와 값 검사(8.1), Record 층과 선택 층 대조(4.5), mock의 `judge_windows`는 타깃 격자만(9.1).
+- v1.3 S0 (2026-10-11): 자산 목록·다운로더(`ag/data/registry_ag.py`, `ag/data/download_ag.py`, `slurm/ag_download_login.sh`)와 `$AG_SOURCES` 배치(7.1), W0-mooncake 분석(`ag/data/traces/mooncake.py`, `scripts/mooncake_stats.py`, 11절), CPU CI와 PR 전 점검(`.github/workflows/cpu.yml`, `tools/pr_check.sh`, `tools/check_secrets.py`, 13절).
 - v1.2 (2026-10-10): v1.1 재검증에서 남은 지적 35개를 반영했다(run_id에 target·shard·repeat, 운영점별 Outcome, FPR(inj) 사유 집합, tool sink 측정 지점, 조각별 hit, 차등 결과 파일 분리, resume 키 확장 등).
 - v1.1 (2026-10-10): 독립 검토 3건(실험 적용 범위, 지표 정확성, 구현 가능성)에서 확인된 지적 64개를 반영했다. 주요 변경: 다중 호출 episode 경로(2.5, 4.12), offline 변형 식별자 `variant_id`(2.4, 7), hit@k를 표준 정의와 서빙 합집합으로 분리(6.1), 판정 규칙을 `score > τ`로 통일(2.3), "같은 ASR" 운영점과 offline gate 재생(6.1), TPOT(보임) 분모 수정(6.2), 판정 전 노출 토큰의 V 정의 수정(6.2), goodput을 위반 비율로 정의(6.3), 보조 타입과 직렬화 규약(2.0, 2.7), 이벤트 수집기와 가상 시계 의미(3.5, 4.1), 단계별 결과 파일(7.3), sweep 축 명시(8.1), 유해 위협 라벨(2.1, 6.1), 2·4-GPU 구성(8.1), Record 크기 재계산(5.2).
 
@@ -1022,6 +1023,13 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
   processed/figNN/<run_id>/*.csv
   figures/figNN.pdf   figures/manifest.json
   numbers.json
+  raw/W0-mooncake/<run_id>/{trace_stats.json, lineage.json, cmd.txt}    # analysis run (v1.3 S0)
+
+$AG_SOURCES/                               # /home/212aig08/ag_sources (env/ag.env); login-node downloads (v1.3 S0)
+  <name>/revision.json                     # status, sha, stage, gated, local_path (LG record shape + stage, ag_role)
+  <name>/probe.json                        # file list + first-row keys of up to 6 data files (source adapters read this)
+  <name>/docs.jsonl.gz | <name>/repo/      # hf_stream docs {"id","text","meta"} | git clone; HF models/datasets stay in $HF_HOME
+  download_status.json   ag_assets_<MMDD>.json   # roll-up; dated snapshot incl. gated state (build plan S0)
 ```
 
 - `<E>`는 계획서 실험 번호 또는 작업 이름(`E0.1`, `W0-grader`, `table4`, `mock`). Table 4 행은 `raw/table4/<baseline>/<run_id>/table4_row.json`이다.
@@ -1229,7 +1237,7 @@ B1a, B1b, B1c, B-full, B-oracle, N1–N6, AG 누적 ablation은 모두 AG 플러
 | 실험 | 모드 | 시스템·구성 요소 | 입력 | 산출 파일 | 지표(6절) |
 | --- | --- | --- | --- | --- | --- |
 | W0-grader | live(B0) + 사람 라벨 | B0(`hf_reference`), SuccessJudge(grader) | pilot 200 | success, `grader_agreement.json` | 일치율 |
-| W0-mooncake | 분석 | `traces/mooncake.py` | Mooncake trace | `trace_stats.json` | 길이 분포 |
+| W0-mooncake | 분석 | `ag/data/traces/mooncake.py`, `scripts/mooncake_stats.py`(v1.3 S0) | Mooncake trace(`$AG_SOURCES/mooncake/repo/FAST25-release/traces/`) | `trace_stats.json` = `{run_id, schema_version, exp_id, name, config, inputs, traces: {key: stats}}`, lineage.json. `raw/index.jsonl`·checks·latest.txt는 쓰지 않음 | 길이 분포, 길이 등급(D-020), `hash_ids` 단위 확인(F-11, A-12), 20분 구간 부하(D-022) |
 | E0.1 | live(참조) + offline | B0 `hf_reference` + Record, scorer `ledger`, selector offline 축 | LC-Inject 8k·32k, 128k 100 | records, hits, success | hit@k[d], hit@k[union], hit@k(chunk), X ∈ {S, A∖S}, 무작위 기준 |
 | E0.2 | offline | J1·J2 offline runner(J2는 첫 서빙 chunk), B1a·B-full·AG offline | E0.1 records | window_scores, hits | R80 FPR(inj), ROC, 판정 창 수 |
 | E0.3 | probe | `ag/probes/depth_probe.py`, `Backbone` | WindowExample(2.6) | probe_results | 6.5 |
@@ -1297,6 +1305,8 @@ SPEC이 기대는 미확인 사실이다. 깨지면 DECISIONS에 적고 묻는�
 - 기존 3.9 venv(`/home3/212aig08/servsec/exp/secu`)는 LG 기존 결과 재현용이다. AG 코드는 쓰지 않는다.
 - 계산 노드는 외부 네트워크가 없다. 모델·데이터·wheel은 로그인 노드에서 미리 받고 `HF_HUB_OFFLINE=1`(CLAUDE.md 4절).
 - CPU 테스트는 3.11에서 `python -m pytest tests -x -q`와 `pytest $(cat tests/manifests/cpu.txt)` 두 명령으로 돈다. GPU 테스트는 `tests/gpu/`에 두고 CUDA가 없으면 skip한다.
+- (v1.3 S0) 같은 두 명령을 GitHub Actions `.github/workflows/cpu.yml`(Python 3.11, CPU torch, main push와 모든 PR)이 돌리고, 앞에 `tools/check_secrets.py`(추적 파일의 `hf_`·`ghp_` 토큰과 `env/*.env`)와 `tools/check_test_classification.py`를 둔다. `tools/pr_check.sh`는 PR 전 같은 점검에 ruff(`--select F,E9`, AG 경로)와 충돌 표시·절대 경로 grep을 더해 로컬에서 돈다.
+- (v1.3 S0) 모델·데이터는 로그인 노드에서 `bash slurm/ag_download_login.sh [--stage pilot|s2|s3|later|optional|all] [--only NAME,...]`로 받는다(인자 없으면 `pilot,s2`). `$AG_SOURCES`에 자산별 `revision.json`·`probe.json`과 날짜별 `ag_assets_<MMDD>.json`(gated 상태 포함)을 남긴다. HF id 중 확인하지 못한 것은 `verify=True`로 표시했고 첫 다운로드 결과로 확인한다.
 
 ## 14. 변경 규칙
 

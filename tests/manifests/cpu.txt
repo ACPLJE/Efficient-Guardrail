@@ -13,9 +13,12 @@ tests/test_ag_oracle_tiny.py
 tests/test_ag_per_request_formulas.py
 tests/test_ag_plots_on_fixture.py
 tests/test_ag_record_roundtrip.py
+tests/test_ag_registry_assets.py
 tests/test_ag_render.py
+tests/test_ag_repo_hygiene.py
 tests/test_ag_selector.py
 tests/test_ag_serde.py
+tests/test_ag_trace_loader.py
 tests/test_ag_virtual_clock.py
 tests/test_ag_window_map.py
 tests/test_correctness.py

@@ -4,6 +4,7 @@
   python agctl.py run --config configs/exp/skeleton.yaml [--out DIR]       # run locally
   python agctl.py run --config ... --sbatch [--submit]                     # render sbatch, sbatch --test-only
   python agctl.py doctor                                                   # environment report
+  python agctl.py assets [--sources DIR] [--stage pilot]                   # $AG_SOURCES download status
 
 --sbatch always runs `sbatch --test-only` on every rendered script; --submit then submits them.
 Defended runs depend on their B0 run (S comes from it), so jobs are split into two waves and the
@@ -152,6 +153,24 @@ def cmd_doctor(a: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_assets(a: argparse.Namespace) -> int:
+    """Table of the AG assets (build plan 4.2 S0) from $AG_SOURCES/download_status.json. Informational: exit 0."""
+    from ag.data.download_ag import asset_rows, default_sources, format_table
+
+    src = Path(a.sources).expanduser() if a.sources else default_sources()
+    if src is None:
+        print("AG_SOURCES is not set (env/ag.env) and --sources not given")
+        return 0
+    if not (src / "download_status.json").exists():
+        print(f"no {src / 'download_status.json'} yet: run bash slurm/ag_download_login.sh on the login node")
+    rows = asset_rows(src)
+    if a.stage:
+        rows = [r for r in rows if r["stage"] in a.stage.split(",")]
+    print(f"sources     {src}")
+    print(format_table(rows))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agctl")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -164,6 +183,10 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(fn=cmd_run)
     d = sub.add_parser("doctor")
     d.set_defaults(fn=cmd_doctor)
+    s = sub.add_parser("assets", help="AG asset download status ($AG_SOURCES/download_status.json)")
+    s.add_argument("--sources", default=None, help="override $AG_SOURCES")
+    s.add_argument("--stage", default=None, help="comma-separated stages to show")
+    s.set_defaults(fn=cmd_assets)
     a = ap.parse_args(argv)
     return a.fn(a)
 
