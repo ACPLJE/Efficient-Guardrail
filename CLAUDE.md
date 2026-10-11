@@ -73,7 +73,7 @@
 
 | 항목 | 값 |
 | --- | --- |
-| 저장소 | `https://github.com/ACPLJE/Efficient-Guardrail` (public). 클러스터 clone 위치는 `/home/212aig08/Efficient-Guardrail`(로그인 노드에서 clone·pull) |
+| 저장소 | `https://github.com/ACPLJE/Efficient-Guardrail` (public). 클러스터 clone 위치는 `/home/212aig08/guardrail/main/Efficient-Guardrail`(로그인 노드에서 clone·pull) |
 | 스케줄러 | Slurm |
 | GPU | RTX 6000 Ada 48 GB. 파티션 `RTX6000ADA` |
 | Python | **AG 작업은 Python 3.11 venv 하나**(D-001). 제안 경로 `/home/212aig08/ag_venv/ag311`(생성 전). 하네스·SGLang·shim·judge·AgentDojo를 모두 여기에 설치한다. AttnTrace(B3)만 별도 venv(Python 3.10.15·torch 2.5.1 고정)에 두고 파일·subprocess 경계로 부른다(SPEC 9.2·13절). 기존 3.9 venv `source /home3/212aig08/servsec/exp/secu/bin/activate`는 LG 기존 결과 재현용이고 AG 코드에는 쓰지 않는다 |
