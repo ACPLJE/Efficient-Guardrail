@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ag"
+version = "0.1.0"
+description = "Asymmetric guard (AG) runtime and evaluation harness, OSDI '27"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+reference = ["torch>=2.4", "transformers>=4.51", "accelerate", "safetensors"]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["ag*", "lgs*"]   # AG imports the LG code as its harm path (CLAUDE.md 3.7)

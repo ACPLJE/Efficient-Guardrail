@@ -127,9 +127,10 @@
 | --- | --- | --- | --- |
 | D-021 | T3(Mistral-Small-24B, GPU 2장)에서 TP-2 ledger가 안 되면 | `test_tp2_ledger_one_request` 결과. 안 되면 T3는 8k·32k만 또는 참조 경로로 | 10/27 |
 | D-022 | Mooncake 재생 배율 `arrival_scale`과 20분 구간 추출 규칙 | 실제 trace는 3.4–6.7 req/s, 41–57k input tok/s \[측정, clone한 trace\]로 1장 + 8B 타깃으로는 원 속도 재생 불가. W0-mooncake 집계 후 | 11/8 |
-| D-023 | 기존 LG 테스트가 3.11 venv에서 green인지, 아니면 CPU gate 명령을 manifest로 한정할지 | S0 첫 작업으로 측정. 7개 모듈이 `env/s1.env`·`LG_OUT`·절대 경로를 참조 \[측정: grep\] | 10/12 |
+| D-023 | 기존 LG 테스트가 3.11 venv에서 green인지, 아니면 CPU gate 명령을 manifest로 한정할지 | S0 첫 작업으로 측정. 7개 모듈이 `env/s1.env`·`LG_OUT`·절대 경로를 참조 \[측정: grep\]. **1차 측정 (2026-10-11, 클라우드 컨테이너, 클러스터 아님)**: Python 3.11.17, torch 2.14.1(CPU), transformers 5.19.0, `env/s1.env` 없음, `requirements.txt`의 pandas·pyarrow·datasets 설치 상태에서 LG 테스트 149 passed, 1 skipped \[측정\]. AG 테스트를 더한 두 CPU 명령도 green(239 passed) \[측정\]. pandas가 없으면 LG 테스트 5개 모듈이 수집 단계에서 실패한다 \[측정\] → 3.11 venv에 `requirements.txt`도 설치해야 한다. 클러스터 3.11 venv에서 한 번 더 재면 닫는다 | 10/12 |
 | D-024 | "판정과 생성 겹치기"를 끈 상태(E4.5 ablation 단계) 구현 | SGLang에 요청 단위 pause가 없으면 chunk 단위 이어 생성(prefix cache 재사용)으로 흉내낸다(SPEC 12절 A-09) | 11/1 |
 | D-025 | 요청당 실제 시간과 E0.2·E1.2 GPU-h 재추정 | S2의 1요청 실측 2건(T2 8k, T1 128k). E1.2는 J1만으로 약 26 h \[계산\] | 10/15 |
+| D-039 | 선택 규칙 `mass_threshold`의 정의 (계획서 4.3 "상위 k개 또는 질량 임계값", E6.1) | 계획서에 식이 없다. S1 코드는 "순위대로 더한 점수 몫이 처음 `mass_tau` 이상이 되는 최소 접두사"로 구현했다(SPEC 4.5 v1.3). 기본 규칙은 top-k이므로 G0·Table 2에는 영향이 없다. 다른 정의(예: 창 점수 ≥ τ 절대 임계값)를 원하면 E6.1 전에 바꾼다 | E6.1 전(11/22) |
 
 ---
 
@@ -137,8 +138,8 @@
 
 | 번호 | 사실 | 출처 | 상태 |
 | --- | --- | --- | --- |
-| F-01 | 로그인 노드에 Python 3.11 인터프리터가 있는가(없으면 conda 또는 uv로 받음) | D-001 | 열림 |
-| F-02 | `/home/212aig08`에 venv 2개(3.11 주 venv, AttnTrace용 3.10)를 둘 공간이 있는가. venv 하나 약 10 GB \[추정\]. Record 저장: 타깃당 약 59–66 GB(8k·32k, layers = all, calibration 포함) + T1 128k 300건 약 8 GB \[계산, SPEC 5.2\] | D-001 | 열림 |
+| F-01 | 로그인 노드에 Python 3.11 인터프리터가 있는가 | D-001 | **확인됨** (2026-10-11, 강지의): `/home3/212aig08/.local/bin/python3.11`, Python 3.11.15 \[측정\] |
+| F-02 | `/home/212aig08`에 venv 2개(3.11 주 venv, AttnTrace용 3.10)를 둘 공간이 있는가. venv 하나 약 10 GB \[추정\]. Record 저장: 타깃당 약 59–66 GB(8k·32k, layers = all, calibration 포함) + T1 128k 300건 약 8 GB \[계산, SPEC 5.2\] | D-001 | **확인됨** (2026-10-11, 강지의): `/home/212aig08`에 공간 있음 |
 | F-03 | SGLang 0.5.21의 `requires-python`과 torch 버전, Python 3.11 wheel 설치 가능 여부 | D-001, 계획서 6.4 | 열림 |
 | F-04 | 무수정 SGLang Triton decode backend가 RTX 6000 Ada(SM89)에서 기동되는가 | 계획서 4.2 | 열림 |
 | F-05 | SGLang Triton decode의 `attn_lse`를 CUDA graph를 켠 상태에서 step마다 읽을 수 있는가 | 계획서 12.2 | 열림 |

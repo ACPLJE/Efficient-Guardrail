@@ -1,6 +1,6 @@
-# AG 설계 명세 (SPEC) v1.2
+# AG 설계 명세 (SPEC) v1.3
 
-2026-10-10 · 강지의 (Jieui) · 상태: 초안 v1.2, `schema_version = 1`(아직 기록된 데이터가 없어 버전 1로 시작한다)
+2026-10-11 · 강지의 (Jieui) · 상태: 초안 v1.3, `schema_version = 1`(아직 기록된 데이터가 없어 버전 1로 시작한다)
 
 기준 문서: 계획서 `docs/asymmetric-guard-osdi27-plan-2026-10-10.md`(이하 "계획서"), 구축 계획 `docs/build-plan-ag-osdi27-2026-10-10.md`, 결정 기록 `docs/DECISIONS.md`. 우선순위는 DECISIONS의 결정·채택 항목 > 계획서 > DECISIONS의 기본안·열림 항목 > SPEC > 코드 > 구축 계획의 설명 문장이다. 해당 주제에 결정·채택 항목이 있으면 그것이 계획서보다 우선한다. 특히 지표 정의는 이 문서 6절이 구축 계획 2.4·4.5절의 서술보다 우선한다. SPEC이 계획서와 다르면 DECISIONS에 항목이 있어야 한다. 코드가 SPEC과 다르면 SPEC을 먼저 고치는 PR을 낸다(CLAUDE.md 5절).
 
@@ -9,6 +9,7 @@
 **변경 이력**
 
 - v1 (2026-10-10): 첫 초안.
+- v1.3 (2026-10-11): S1 걷는 뼈대 구현에서 SPEC이 정하지 않았던 세부를 적었다. `schema_version`은 1 그대로다(첫 실데이터 기록 전, 14절). NB = 1이면 창 1개(1.1), 이벤트 `payload` 키 관례(3.2), `SystemConfig`(4.2), `mass_threshold`의 S1 정의(4.5, D-039 열림), mock judge의 지연 모형 `Judge.latency_ns`(4.6), `hits.jsonl`·`outcomes_run.jsonl`의 추가 열과 hit 행의 `variant_id`에서 k 제외(7.3), `plots/numbers.py` → `plots/abstract_numbers.py`(7.4).
 - v1.2 (2026-10-10): v1.1 재검증에서 남은 지적 35개를 반영했다(run_id에 target·shard·repeat, 운영점별 Outcome, FPR(inj) 사유 집합, tool sink 측정 지점, 조각별 hit, 차등 결과 파일 분리, resume 키 확장 등).
 - v1.1 (2026-10-10): 독립 검토 3건(실험 적용 범위, 지표 정확성, 구현 가능성)에서 확인된 지적 64개를 반영했다. 주요 변경: 다중 호출 episode 경로(2.5, 4.12), offline 변형 식별자 `variant_id`(2.4, 7), hit@k를 표준 정의와 서빙 합집합으로 분리(6.1), 판정 규칙을 `score > τ`로 통일(2.3), "같은 ASR" 운영점과 offline gate 재생(6.1), TPOT(보임) 분모 수정(6.2), 판정 전 노출 토큰의 V 정의 수정(6.2), goodput을 위반 비율로 정의(6.3), 보조 타입과 직렬화 규약(2.0, 2.7), 이벤트 수집기와 가상 시계 의미(3.5, 4.1), 단계별 결과 파일(7.3), sweep 축 명시(8.1), 유해 위협 라벨(2.1, 6.1), 2·4-GPU 구성(8.1), Record 크기 재계산(5.2).
 
@@ -31,7 +32,7 @@
 
 - **토큰 위치**는 타깃 tokenizer로 chat template을 적용한 전체 prompt의 0부터 시작하는 index다. 신뢰 여부와 payload 위치는 렌더링 뒤 토큰 span으로 바뀐다(2.2).
 - **블록**: 크기 `B = 128`(설정 `split_tokens`). 블록 j는 토큰 `[jB, min((j+1)B, n))`. 블록 수 `NB = ceil(n / B)`. 마지막 prompt 블록은 짧을 수 있다.
-- **창**: 인접 블록 두 개, 창 w = 블록 {w, w+1}, `w = 0 … NB-2`. 창 수 `NW = NB - 1`(NB ≥ 2). 창 길이 256토큰, stride 128.
+- **창**: 인접 블록 두 개, 창 w = 블록 {w, w+1}, `w = 0 … NB-2`. 창 수 `NW = NB - 1`(NB ≥ 2). NB = 1(n ≤ 128)이면 블록 0 하나를 창 0으로 두어 모든 요청이 순위 대상 창을 하나 이상 갖게 한다(v1.3). 창 길이 256토큰, stride 128.
 - 대표 창 수 \[계산\]:
 
 | 입력 토큰 n | NB | NW | 비고 |
@@ -411,6 +412,7 @@ class Event:
 ```
 
 - **정렬 키**는 `(t_ns, request_id, type, chunk_id or -1, job_id or "", seq)`다. seq는 마지막 수단이다.
+- **`payload` 키 관례** (v1.3, S1): `CHUNK_GENERATED.payload`에 `selected`(그 chunk에서 고른 창 목록)와 `cached_windows`(cache로 답한 창), `REQUEST_BLOCKED.payload`에 생성 전 판정의 `selected`, `CHUNK_RELEASED`·`CHUNK_DELIVERED.payload`에 `text`(sink로 나가는 chunk 텍스트, openai_front가 스트리밍에 쓴다), `FINISHED.payload["prompt"]`에 `{n_tokens, n_blocks, n_windows, n_eligible, payload_windows, payload_windows_per_site, payload_rule}`(하네스가 `outcomes_run`에 옮긴다). 지표 함수는 `payload`의 모르는 키를 무시한다.
 
 ### 3.3 누가 무엇을 내는가
 
@@ -505,6 +507,7 @@ class System(abc.ABC):
     def info(self) -> SystemInfo: ...
 ```
 
+- `SystemConfig(system_id, impl, flags, exp)`(v1.3): `flags`는 8.2의 resolved 시스템 설정, `exp`는 job별 resolved 실험 설정(공정성 knob, chunking, record, operating_point)이다. `impl`은 registry 이름(`@register_system`)이다.
 - `run`은 한 요청의 이벤트를 내는 blocking generator다. 하네스는 open loop에서 요청마다 스레드 하나로 `run`을 부른다(A-06). 플러그인 안의 judge pool 같은 다른 스레드가 내는 이벤트는 `ctx.emit`으로 보낸다.
 - `run_many`는 batch가 이득인 offline 시스템(기록 위 재계산, offline judge)이 덮어쓴다.
 - `mode`: `live`는 실제 생성(엔진 또는 참조 구현), `offline`은 Record와 저장된 점수에서 다시 계산(새 생성 없음), `external`은 다른 도구가 만든 결과를 읽어 Outcome만 채운다(B5 MELON).
@@ -624,6 +627,7 @@ def union_select(per_scorer: Sequence[np.ndarray], cfg: SelectorConfig) -> tuple
 
 - **층 선택** (D-031): L은 `layer_attn_kind = "full"`인 층의 목록이다(T4는 sliding 층을 뺀 12개, D-037). `upper_half` = 그 목록의 뒤쪽 절반. `tracked8` = `upper_half`에서 균등 간격 8개 `U[round(i·(|U|−1)/7)]`, i = 0…7. `last` = 마지막 층. 타깃별 결과 층 목록을 `configs/targets/*.yaml`에 적는다. 집계 A = `upper_half` + uniform, 집계 B = `upper_half` + learned, 집계 C = `tracked8` + uniform. G0는 C로 본다(계획서 8.2).
 - **학습 가중(집계 B)**은 head별 질량이 필요하므로 Record의 `chunk_head_mass`가 있는 표준 chunk 3종에서만 쓴다. 서빙 chunk와 E6.1의 chunk sweep에는 집계 A·C만 쓴다. `chunk_head_mass`는 t ≥ 1 행의 평균이므로 `head_weighting = learned`면 `first_token = skip`이어야 한다(검증 규칙, 9.1).
+- **`mass_threshold`** (v1.3, S1 정의, D-039 열림): 순위대로 창을 더해 순위 대상 창의 양수 점수 합에서 차지하는 몫이 처음으로 `mass_tau` 이상이 되는 최소 접두사를 고른다. 계획서는 정의를 두지 않았고 E6.1이 top-k와 비교한다.
 - **`ledger_sample_every`**: 1이 아니면 sampled 토큰만 chunk 평균에 넣는다. 1이 아닌 run은 hit@k 손실을 함께 보고한다(계획서 10.2 G1 fallback).
 - verdict cache로 이미 판정한 창도 선택에서 빼지 않는다. judge 호출만 건너뛴다(판정 창 수는 6.1).
 
@@ -684,6 +688,7 @@ class JudgePool:
 ```
 
 - 구현: `prompt_guard2`(J1, 창만 봄), `agentwatcher_monitor`(J2, 과업·창·chunk를 봄), `piguard`(J3), `datasentinel`(J4), `output_guard`(OG, Qwen3Guard-Stream 또는 Gen), `mock_judge`(지연·점수를 요청 매개변수로; 지연·누락 주입 가능).
+- `Judge.latency_ns(batch)`(v1.3): 가상 시계 run에서 mock judge의 지연을 모형으로 낸다. 실제 judge는 pool이 시간을 재므로 구현하지 않는다.
 - `submit`은 요청 하나의 job 하나를 만든다. 요청 간 batch는 pool 안에서만 묶고, `JOB_SUBMITTED/STARTED/DONE`은 job마다 `ctx.emit`으로 낸다. batch의 JOB_STARTED·JOB_DONE 시각은 batch 전체의 시작·끝이고, `payload["batch_windows"]`에 batch 전체 창 수를 적는다(6.7 GPU 초 배분용).
 - **verdict cache** 키: `(judge_id, sha256(window_token_ids), sha256(task) if needs_task, sha256(chunk_token_ids) if needs_chunk, threshold_id)`. 정책 `off | per_request | global`은 config_hash에 들어간다(D-011). cache hit은 job을 만들지 않고, 그 chunk의 `CHUNK_GENERATED.cached_verdict_ns`에 결정 시각을 남긴다.
 - **offline에서 chunk가 필요한 judge**(J2)는 계획서 8.2 E0.2를 따라 **첫 서빙 chunk**를 넣고, 모든 서빙 chunk c에 대해 `s(w, c) := s(w, first)`로 쓴다(`judge_chunk = "first"`). live AG+J2는 서빙 chunk마다 판정하므로 offline 행과 다를 수 있고, 표에 그 차이를 표시한다(9.2).
@@ -1045,9 +1050,9 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 | 파일 | 쓰는 쪽·시점 | 행 | 유일 키 |
 | --- | --- | --- | --- |
 | `events.jsonl` | 수집기, 실행 중 | Event + `schema_version` | `(request_id, attempt, seq)` |
-| `outcomes_run.jsonl` | 하네스, 요청이 끝날 때 | blocked, block_reason, block_reasons, error_kind, judged_windows*, judge_calls, selected, payload_windows, harm_score, doc_scores, cost, hit_live, generation 요약 | `(request_id, variant_id="live")` |
+| `outcomes_run.jsonl` | 하네스, 요청이 끝날 때 | blocked, block_reason, block_reasons, error_kind, judged_windows*, judge_calls, selected, payload_windows, payload_windows_per_site, n_windows, n_eligible, prompt_len, harm_score, doc_scores, cost, generation(Generation 전체; hit_live는 score_outcomes가 outcomes에서 계산) | `(request_id, variant_id="live")` |
 | `success.jsonl` | `score_outcomes`, 실행 뒤 | `unit_id, variant_id, threshold_id, tau, attack_success, utility, success_judge` | `(unit_id, variant_id, threshold_id)` |
-| `hits.jsonl` | offline scorer | `request_id, variant_id, variant, chunk_def("first8"\|"first32"\|"all"\|"union"\|"serving:<id>"), site_rule("single"\|"any"\|"all"), k, hit, payload_rank` | `(request_id, variant_id, chunk_def, site_rule, k)` |
+| `hits.jsonl` | offline scorer | `request_id, variant_id, variant, chunk_def("first8"\|"first32"\|"all"\|"union"\|"serving:<id>"), site_rule("single"\|"any"\|"all"), k, hit, payload_rank, n_eligible, n_payload, m`(m = 무작위 기준의 m). hit 행의 `variant_id`는 k를 뺀 변형 입력의 해시다(k는 행의 열) | `(request_id, variant_id, chunk_def, site_rule, k)` |
 | `window_scores.jsonl` | offline judge·scorer. `source_id` = scorer_id 또는 judge_id | `request_id, target_id, source_id, variant_id, window_spec, judge_chunk("none"\|"first"\|"serving:<id>"), window_id, score, latency_ns, cached` | `(request_id, source_id, variant_id, window_spec, judge_chunk, window_id)` |
 | `outcomes.jsonl` | `score_outcomes`가 위 파일들과 B0 run의 success를 join해 만든 파생 파일 | Outcome(2.4) | `(unit_id, variant_id, threshold_id)` |
 | `probe_results.jsonl` | probe | `backbone, layer, rel_depth, task, negative_set, seed, auroc, tpr_at_fpr: {1e-3, 2e-4, 5e-5}` | `(backbone, layer, task, negative_set, seed)` |
@@ -1062,7 +1067,7 @@ $AG_OUT/                                   # /home/212aig08/ag_results (env/ag.e
 
 - `summary.json`: 지표 이름(names enum) → `{value, n, ci_low, ci_high, unit}`. 운영점별 임계값과 "도달 불가" 표시, ROC, 해결된 SLO 임계값, 시스템 info, 고른 variant_id(예: B1a의 창 체계), 실제/trace 입력 토큰 비.
 - `checks.json`: `[{name, ok, detail}]`. 예: `invariants`, `no_release_before_verdict`, `chunk_without_verdict`, `held_chunks_at_end == 0`, `judge_queue_empty`, `no_traceback_in_logs`, `shim_active_matches_system`, `fairness_knobs_equal`, `client_wait_bounded`, `b1a_b1c_same_judge`.
-- `numbers.json`(초록 수치 7개, 계획서 9.3): `{ "abs1": {value, unit, ci, tag: "측정", source_run_ids, code_commit, target_id}, … }`. `plots/numbers.py`만 쓴다. 초록 7의 분모는 타깃별 창 수(D-014)다.
+- `numbers.json`(초록 수치 7개, 계획서 9.3): `{ "abs1": {value, unit, ci, tag: "측정", source_run_ids, code_commit, target_id}, … }`. `plots/abstract_numbers.py`만 쓴다(`plots/numbers.py`라는 이름은 `python plots/<script>.py`로 실행할 때 표준 라이브러리 `numbers`를 가려 numpy import를 깨뜨리므로 쓰지 않는다). 초록 7의 분모는 타깃별 창 수(D-014)다.
 
 ## 8. 설정 (YAML)
 

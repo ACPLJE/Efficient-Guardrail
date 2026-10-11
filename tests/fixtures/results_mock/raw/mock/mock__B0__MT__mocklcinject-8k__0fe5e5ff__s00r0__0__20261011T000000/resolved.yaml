@@ -1,0 +1,97 @@
+chunking:
+  first: 8
+  next: 32
+  sentence: false
+clock: virtual
+closed_loop:
+  concurrency: 1
+  n_requests: null
+data:
+  generator: mock_lc_inject
+  length_classes:
+  - 8k
+  manifest: mocklcinject
+  n_attack: 6
+  n_benign: 2
+  sink: stream
+  source: mock
+  split: test
+exp_id: mock
+fairness:
+  dtype: float32
+  ignore_eos: true
+  max_new_tokens: 64
+  temperature: 0.0
+fairness_exempt: []
+judges:
+- MJ
+n_shards: 1
+notes: fixture for tests/test_ag_plots_on_fixture.py
+operating_point: F5
+outputs:
+- Fig.9
+plan_ref: build plan 4.1
+record:
+  first_token: true
+  gen_mass: false
+  layers: all
+  per_chunk_heads: true
+  precision: fp16
+repeat: 0
+repeats: 1
+scorers:
+- ledger
+seed: 0
+selector:
+  first_token: skip
+  head_weighting:
+  - uniform
+  k:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  layers:
+  - tracked8
+  rule: topk
+shard: 0
+slurm:
+  gres: gpu:1
+  shards: 1
+  time: 01:00:00
+success_judge: mock
+sweep:
+  include: []
+  job_axes: []
+  offline_axes:
+  - selector.k
+  - selector.layers
+  - selector.head_weighting
+system:
+  flags:
+    engine: mock
+    gate: none
+    harm_scan: 'off'
+    inj_path: 'off'
+    mock:
+      prefill_us_per_token: 20.0
+      target:
+        concentration: 0.03
+        gen_share: 0.1
+        kind: synthetic
+        success_rate: 0.7
+      tpot_ms: 20.0
+    write_records: true
+  impl: mock
+  system_id: B0
+system_id: B0
+target: MT
+topology:
+  n_gpus: 1
+  placement:
+    guard: same
+    judge: same
+  target_replicas: 1
+workload: null

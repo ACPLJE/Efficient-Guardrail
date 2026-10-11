@@ -1,0 +1,77 @@
+[
+  {
+    "detail": "",
+    "name": "invariants.lifecycle_order",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.release_after_generated",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "no_release_before_verdict",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.in_order_release",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.no_release_after_block",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.harm_scan_before_release",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.deadline_fail_closed",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.one_terminal",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.finished_after_jobs",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "chunk_without_verdict",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "held_chunks_at_end",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "invariants.delivered_after_released",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "client_wait_bounded",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "all_requests_have_events",
+    "ok": true
+  },
+  {
+    "detail": "",
+    "name": "no_traceback_in_logs",
+    "ok": true
+  }
+]

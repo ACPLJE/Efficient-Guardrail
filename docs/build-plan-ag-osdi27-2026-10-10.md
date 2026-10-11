@@ -154,7 +154,7 @@ ag/                          # 새 패키지. 코드·주석 영어
 engine_integration/
   sglang/                    # patch 파일 1개 + apply/check/remove + 버전별 shim     (kvcached integration, serverlessllm vllm_patch)
   vllm/                      # 2차(축소 1순위)
-plots/                       # fig01.py … fig16.py, table2–4.py, numbers.py, _common.py   (GraCE, vllm sweep/plot.py)
+plots/                       # fig01.py … fig16.py, table2–4.py, abstract_numbers.py, _common.py   (GraCE, vllm sweep/plot.py)
 tests/                       # manifests/{cpu,gpu,integration}.txt + 분류 검사 도구     (kvcached)
   fixtures/results_mock/     # 그림 스크립트가 GPU 없이 도는 작은 결과 트리
 slurm/                       # common.sh(기존) + 실험별 sbatch 템플릿
@@ -193,7 +193,7 @@ docs/                        # SPEC.md, DECISIONS.md, metrics.md, AE.md
 
 **`engine_integration/sglang/`**: `ag-sglang-0.5.21.patch`(Triton decode 분할 고정 + `attn_lse` 반출), `patch.sh / check_patch.sh / remove_patch.sh`(dry-run 멱등), `shim/`(ledger·gate·scheduler hook, `PatchManager` + 버전 범위, 적용 시 한 줄 로그 → 하네스가 grep해서 `system_active` 체크; B0에서는 그 줄이 없어야 함), `README.md`(상류 commit, hunk 표시 규칙 `# AG:`).
 
-**`plots/`**: `_common.py`(run 로더, `--run-id latest`, group-by/filter/error bar, 누락 (system, workload) 셀을 **실패로** 보고), `fig01.py`…`fig16.py`, `table2.py`…`table4.py`, `numbers.py` → `numbers.json`(9.3절 7개). 모두 `results/`만 읽는다.
+**`plots/`**: `_common.py`(run 로더, `--run-id latest`, group-by/filter/error bar, 누락 (system, workload) 셀을 **실패로** 보고), `fig01.py`…`fig16.py`, `table2.py`…`table4.py`, `abstract_numbers.py` → `numbers.json`(9.3절 7개). 모두 `results/`만 읽는다.
 
 **`tests/`**: `manifests/{cpu,gpu,integration}.txt` + `tools/check_test_classification.py`; `test_metrics_identity.py`(scripted clock: SPEC 6.2 식별식 1–3, `TTFV == TTFT_gen + (g0 − f) + (l0 − g0) + (d0 − l0)`(SPEC 6.2 식별식 1)), `test_mock_end_to_end.py`(데이터 → mock system → events → JSONL → `plots/fig11.py`), `test_lineage_mismatch.py`, `test_patch_applies.py`(dry-run), `test_trace_loader.py`, `test_plots_on_fixture.py`(16개 전부 mock fixture로).
 
@@ -427,7 +427,7 @@ S0 계약·자산(10/12) ─ S1 걷는 뼈대(10/14) ─┬─ S1E 엔진 spike 
 7. `ag/harness/{events.py, request_state.py, runner.py, writer.py, lineage.py, checks.py, openai_front.py}`. lineage는 **자체 비교기**를 둔다: `lgs1/lineage.py:assert_resume_compatible`은 LINEAGE_KEYS 6개만 비교하므로 [측정: lgs1/lineage.py] AG 필드 전부(patch_sha, engine_version, producer, model_sha.*, env_hash.{harness,engine}, slurm_array_*, hostname)를 비교하고, lgs1에서는 `canonical_hash`·`dir_fingerprint`·`RowsWriter`만 가져온다. openai_front는 OpenAI 호환 `/v1/chat/completions` 골격(backend는 mock)으로 role 경계 → trusted_spans, 도구 호출 완료 경계 규칙을 여기서 정한다(AgentDojo·E0.4·AG gate가 공통으로 쓴다).
 8. `ag/metrics/{names.py, quality.py(hit_at_k), per_request.py(TTFT_gen·TPOT·TTFV 식), aggregate.py}`.
 9. 결과 디렉터리: `$AG_OUT/raw/mock/<run_id>/{lineage.json, resolved.json, events.jsonl, records/, summary.json, checks.json, cmd.txt, server.log}`. `run_id = <E>-<system>-<workload|data>-<config_hash[:8]>-<seed>-<ts>`; 하위 run은 `<E>-final`, `<E>-gpu`.
-10. `plots/{_common.py, fig09.py, numbers.py}`. `_common`은 `--run-id latest`, mock run의 latest 거부, lineage 불일치 실패, `-dirty` 거부.
+10. `plots/{_common.py, fig09.py, abstract_numbers.py}`. `_common`은 `--run-id latest`, mock run의 latest 거부, lineage 불일치 실패, `-dirty` 거부.
 11. `tests/fixtures/results_mock/`(run 2개; 행 파일은 `events.jsonl.txt`로 두어 규칙 3.2의 `*.jsonl` 미추적과 충돌하지 않게), `tests/gpu/conftest.py`(skipif CUDA 없음; 기존 `tests/conftest.py` 미수정), `agctl.py` 최소(run / doctor / `--sbatch` 시 `sbatch --test-only` 자동 실행).
 
 **첫 그림**: Fig. 9(a) hit@k 대 k. mock 집중 fixture는 hit@1 ≈ 1.0, noise fixture는 k에 단조 증가, N1 무작위는 8/255 = 3.1 % [계산]. mock으로 그린 그림은 "1차 산출"로 세지 않는다.
