@@ -13,6 +13,30 @@ cp env/ag.env.example env/ag.env         # 경로 확인. env/ag.env는 커밋�
 python agctl.py doctor
 ```
 
+## 1b. 자산 다운로드 (S0, 로그인 노드만)
+
+```bash
+cp env/ag.env.example env/ag.env   # 이미 있으면 AG_SOURCES=/home/212aig08/ag_sources 한 줄만 추가
+bash slurm/ag_download_login.sh --list          # 자산 목록 (stage, gated, verify 표시)
+bash slurm/ag_download_login.sh --stage pilot   # T2 + bg_wiki_en (S2 step 0 pilot에 필요한 것만)
+bash slurm/ag_download_login.sh                 # 인자 없으면 pilot + s2 (T1, grader, judge, 원천 데이터, Mooncake)
+python agctl.py assets                          # 상태표 ($AG_SOURCES/download_status.json)
+```
+
+- nohup으로 돌고 로그는 `$AG_OUT/logs/ag_download_<MMDD_HHMMSS>.log`다. gated 모델(T1, Prompt Guard 2)은 승인 뒤 `HF_TOKEN`을 export하고 다시 돌린다. 날짜별 `$AG_SOURCES/ag_assets_<MMDD>.json`에 gated 상태가 남는다.
+- `verify` 표시가 붙은 id는 확인하지 못한 값이다. 실패하면 `revision.json`의 `error`와 `alternatives`를 보고 알려 준다.
+- 원천 데이터마다 `probe.json`(파일 목록과 첫 행 키)이 생긴다. S2 ②의 원천 adapter는 이것을 보고 만든다.
+
+### W0-mooncake (CPU)
+
+```bash
+python scripts/mooncake_stats.py --name fast25 \
+  --trace conversation=$AG_SOURCES/mooncake/repo/FAST25-release/traces/conversation_trace.jsonl \
+  --trace toolagent=$AG_SOURCES/mooncake/repo/FAST25-release/traces/toolagent_trace.jsonl --out $AG_OUT
+```
+
+`$AG_OUT/raw/W0-mooncake/<run_id>/trace_stats.json`에 길이 분포, D-020 길이 등급, `hash_ids` 512토큰 단위 확인(F-11), 20분 구간 부하(D-022)가 나온다. trace 파일 이름은 clone 뒤 확인한다.
+
 ## 2. 뼈대 실행 (CPU, mock, 가상 시계)
 
 ```bash

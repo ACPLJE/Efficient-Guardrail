@@ -137,7 +137,7 @@
 | --- | --- | --- | --- |
 | D-021 | T3(Mistral-Small-24B, GPU 2장)에서 TP-2 ledger가 안 되면 | `test_tp2_ledger_one_request` 결과. 안 되면 T3는 8k·32k만 또는 참조 경로로 | 10/27 |
 | D-022 | Mooncake 재생 배율 `arrival_scale`과 20분 구간 추출 규칙 | 실제 trace는 3.4–6.7 req/s, 41–57k input tok/s \[측정, clone한 trace\]로 1장 + 8B 타깃으로는 원 속도 재생 불가. W0-mooncake 집계 후 | 11/8 |
-| D-023 | 기존 LG 테스트가 3.11 venv에서 green인지, 아니면 CPU gate 명령을 manifest로 한정할지 | S0 첫 작업으로 측정. 7개 모듈이 `env/s1.env`·`LG_OUT`·절대 경로를 참조 \[측정: grep\]. **1차 측정 (2026-10-11, 클라우드 컨테이너, 클러스터 아님)**: Python 3.11.17, torch 2.14.1(CPU), transformers 5.19.0, `env/s1.env` 없음, `requirements.txt`의 pandas·pyarrow·datasets 설치 상태에서 LG 테스트 149 passed, 1 skipped \[측정\]. AG 테스트를 더한 두 CPU 명령도 green(239 passed) \[측정\]. pandas가 없으면 LG 테스트 5개 모듈이 수집 단계에서 실패한다 \[측정\] → 3.11 venv에 `requirements.txt`도 설치해야 한다. 클러스터 3.11 venv에서 한 번 더 재면 닫는다 | 10/12 |
+| D-023 | 기존 LG 테스트가 3.11 venv에서 green인지, 아니면 CPU gate 명령을 manifest로 한정할지 | **닫힘 (2026-10-11, 클러스터 측정)**: 로그인 노드 `gsai-login-3`, Python 3.11.15, `/home/212aig08/ag_venv/ag311`, clone `/home/212aig08/guardrail/main/Efficient-Guardrail`(PR #1 merge 전 브랜치 상태). `pytest $(cat tests/manifests/cpu.txt)` → 300 passed, 355 s \[측정\]. `pytest tests/gpu -q` → 1 skipped(로그인 노드라 CUDA 없음) \[측정\]. manifest가 모든 test 모듈을 하나씩 덮으므로(`tools/check_test_classification.py`) 두 결과의 합이 `tests` 전체다 \[해석\]. 컨테이너에서 skip되던 `test_zeroshot_oom`의 llama4 경우도 클러스터 transformers에서는 통과했다 \[측정\]. 결론: LG 테스트는 3.11 venv에서 green이고 CPU gate 두 명령을 그대로 쓴다. `requirements.txt`도 venv에 설치한다(pandas 등). 1차 측정(컨테이너): 149 passed, 1 skipped(LG만) | 닫힘 |
 | D-024 | "판정과 생성 겹치기"를 끈 상태(E4.5 ablation 단계) 구현 | SGLang에 요청 단위 pause가 없으면 chunk 단위 이어 생성(prefix cache 재사용)으로 흉내낸다(SPEC 12절 A-09) | 11/1 |
 | D-025 | 요청당 실제 시간과 E0.2·E1.2 GPU-h 재추정 | S2의 1요청 실측 2건(T2 8k, T1 128k). E1.2는 J1만으로 약 26 h \[계산\] | 10/15 |
 | D-039 | 선택 규칙 `mass_threshold`의 정의 (계획서 4.3 "상위 k개 또는 질량 임계값", E6.1) | 계획서에 식이 없다. S1 코드는 "순위대로 더한 점수 몫이 처음 `mass_tau` 이상이 되는 최소 접두사"로 구현했다(SPEC 4.5 v1.3). 기본 규칙은 top-k이므로 G0·Table 2에는 영향이 없다. 다른 정의(예: 창 점수 ≥ τ 절대 임계값)를 원하면 E6.1 전에 바꾼다 | E6.1 전(11/22) |
@@ -157,7 +157,7 @@
 | F-07 | SGLang에서 release gate를 넣을 정확한 위치(output streamer로 추정) | 계획서 12.2 | 열림 |
 | F-08 | FlashInfer `tmp_s`를 plan이 돌려주는 offset으로 Python에서 읽을 수 있는가(선택 단계 S8g만) | 계획서 12.2 | 열림 |
 | F-09 | Rennervate·SingProbe의 코드 공개 여부, CausalArmor 코드 | 계획서 12.2 | 열림 |
-| F-10 | Llama-3.1-8B-Instruct, Prompt Guard 2 접근 승인 | 계획서 12.2 | 열림(신청 필요) |
+| F-10 | Llama-3.1-8B-Instruct, Prompt Guard 2 접근 승인 | 계획서 12.2 | 신청함 (2026-10-11, 강지의). 승인 대기. 미승인 동안 S2 step 0 pilot은 T2(비 gated)로 진행 |
 | F-11 | Mooncake trace의 길이 분포 전체와 `hash_ids` 단위. FAST25-release README는 512토큰 블록, prefix 포함 해시라고 적음 \[문헌\] | 계획서 12.2 | 일부 확인(분포는 W0-mooncake) |
 | F-12 | OSDI '27 CFP의 부록·보충 자료 허용 범위와 조기 심사 방식 | 계획서 12.2 | 열림 |
 | F-13 | 지시문이 많은 배경 corpus의 출처별 라이선스 | 계획서 12.2 | 열림 |
