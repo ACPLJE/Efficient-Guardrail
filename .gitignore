@@ -11,3 +11,12 @@ docs/.s8_project_doc.md
 *.rows.jsonl
 *.pt
 *.npz
+# AG (CLAUDE.md 3.2): results, row files, secrets and figures stay out of git.
+# Test fixtures keep row files as *.jsonl.txt, so no exception is needed for tests/fixtures/.
+env/*.env
+results/
+figures/*.pdf
+*.jsonl
+*.egg-info/
+build/
+/tmp*/

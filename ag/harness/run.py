@@ -1,0 +1,67 @@
+"""python -m ag.harness.run --config configs/exp/skeleton.yaml [--out DIR] [--clock virtual]
+
+Expands the experiment into jobs, writes raw/<E>/jobs/<ts>.jsonl and runs every job (or one
+--job-index, the Slurm array index). Exit code 2 on a lineage mismatch (SPEC 7.1).
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+
+from ag.config.schema import load_exp
+from ag.harness.lineage import EXIT_LINEAGE_MISMATCH, LineageMismatch, fail_on_mismatch
+from ag.harness.runner import run_job
+from ag.metrics.score import check_record_covers_selector
+from ag.sweep.expand import JobsFileMismatch, expand, fairness_mismatches, fresh_ts, write_jobs
+
+EXIT_FAIRNESS = 3
+
+
+def default_out() -> Path:
+    return Path(os.environ.get("AG_OUT", "results"))
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="ag.harness.run")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--out", default=None, help="results root ($AG_OUT, default ./results)")
+    ap.add_argument("--clock", choices=["monotonic", "virtual"], default=None)
+    ap.add_argument("--job-index", type=int, default=None, help="run one job (Slurm array index)")
+    ap.add_argument("--limit", type=int, default=None, help="first N requests per job (smoke runs)")
+    ap.add_argument("--ts", default=None, help="expand timestamp (reuse to resume the same run_ids)")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    out = Path(args.out) if args.out else default_out()
+    exp = load_exp(args.config)
+    ts = args.ts or fresh_ts(out / "raw" / exp["exp_id"] / "jobs")
+    jobs = expand(exp, ts=ts, clock=args.clock)
+    mism = fairness_mismatches(jobs, exp.get("fairness_exempt") or [])
+    if mism:                        # checks.fairness_knobs_equal (SPEC 8.3): compared before any run
+        print("checks.fairness_knobs_equal failed:\n  " + "\n  ".join(mism), file=sys.stderr)
+        return EXIT_FAIRNESS
+    for j in jobs:                  # Records must cover every offline selector variant (before any generation)
+        check_record_covers_selector(j.resolved)
+    fairness_detail = f"{len(jobs)} jobs compared at expand; exempt={list(exp.get('fairness_exempt') or [])}"
+    try:                            # run_id is fixed once at expand time (SPEC 1.5)
+        path = write_jobs(out, jobs, ts)
+    except JobsFileMismatch as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_LINEAGE_MISMATCH
+    print(f"expanded {len(jobs)} jobs -> {path}")
+    if args.job_index is not None:
+        jobs = [jobs[args.job_index]]
+    cmd = " ".join([sys.executable, "-m", "ag.harness.run"] + (argv if argv is not None else sys.argv[1:]))
+    try:
+        for job in jobs:
+            run_dir = run_job(job, out, cmd=cmd, limit=args.limit, fairness_detail=fairness_detail)
+            print(f"run {job.run_id} -> {run_dir}")
+    except LineageMismatch as e:
+        fail_on_mismatch(e)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

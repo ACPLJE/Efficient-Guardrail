@@ -1,0 +1,2 @@
+{"exp_id": "mock", "path": "raw/mock/mock__B0__MT__mocklcinject-8k__a08dc046__s00r0__0__20261011T000000", "run_id": "mock__B0__MT__mocklcinject-8k__a08dc046__s00r0__0__20261011T000000", "schema_version": 1, "system_id": "B0"}
+{"exp_id": "mock", "path": "raw/mock/mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001", "run_id": "mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001", "schema_version": 1, "system_id": "B0"}
