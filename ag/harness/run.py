@@ -18,6 +18,7 @@ from ag.metrics.score import check_record_covers_selector
 from ag.sweep.expand import JobsFileMismatch, expand, fairness_mismatches, fresh_ts, write_jobs
 
 EXIT_FAIRNESS = 3
+EXIT_MISSING_ASSET = 4      # model / data not on disk (download on the login node first)
 
 
 def default_out() -> Path:
@@ -60,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"run {job.run_id} -> {run_dir}")
     except LineageMismatch as e:
         fail_on_mismatch(e)
+    except FileNotFoundError as e:  # the messages name the asset and the login-node download command
+        if os.environ.get("AG_DEBUG"):
+            raise
+        print(f"error: {e}  (AG_DEBUG=1 for the traceback)", file=sys.stderr)
+        return EXIT_MISSING_ASSET
     return 0
 
 

@@ -1,0 +1,28 @@
+# CPU smoke of the W0-grader path (CLAUDE.md 3.4): same generator, system and scoring as
+# w0_grader_pilot.yaml on the tiny local HF model (configs/targets/tiny-hf.yaml, built offline and cached
+# under ${AG_CACHE:-~/.cache/ag}). 1k prompts + 16 new tokens fit the tiny model's 4,096 positions.
+#   python -m ag.harness.run --config configs/exp/w0_grader_smoke.yaml --out /tmp/ag_smoke
+exp_id: W0-smoke
+plan_ref: "5.3 #7, 8.2 W0; build plan S2 step 0 (CPU smoke)"
+notes: "tiny random model; wiring only, never reported"
+outputs: [label_sheet]
+targets: [tiny-hf]
+systems: [b0_ref]
+data:
+  generator: lc_inject_draft
+  manifest: lcdraft
+  source: lc_draft
+  split: pilot
+  length_classes: [1k]
+  n_attack: 4
+  n_benign: 2
+  seed: 0
+  sink: stream
+  background_paths: ["tests/data/bg_docs_small.jsonl.txt"]
+fairness: { max_new_tokens: 16, temperature: 0.0, ignore_eos: false, dtype: float32 }
+fairness_exempt: []
+success_judge: pending
+clock: monotonic
+repeats: 1
+seeds: [0]
+slurm: { gres: "gpu:1", time: "00:30:00", shards: 1 }

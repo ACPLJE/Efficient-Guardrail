@@ -126,6 +126,7 @@
 | D-036 | 운영점 임계값의 calibration 단위와 live 기본 운영점 | τ는 (target, judge, length_class)마다 원천을 합친 calibration에서 정함. live 품질 run의 기본 운영점은 F5(문서 FPR 5 %) | 10/16 | E0.2, E3.1, E3.4 |
 | D-037 | T4(gpt-oss-20b, 선택)의 추적 층 | 전체 문맥을 보는 12개 층에서만 upper_half·tracked8을 고르고, sliding 층은 제외. Record에 attention sink 질량을 따로 기록 | T4 실험 전 | E6.3 |
 | D-038 | `lgs1/lineage.py` 재사용 범위 (CLAUDE.md 3.3 "가능하면 그 모듈을 확장") | `canonical_hash`, `dir_fingerprint`, `code_commit`, `iter_rows`만 재사용. `RowsWriter`와 `assert_resume_compatible`은 LG의 6-키 Lineage를 전제하므로 쓰지 않고 `ag/harness/{lineage,writer}.py`에 AG 필드 전체를 비교하는 구현을 둔다 | 10/12 | 모든 run의 lineage·resume |
+| D-041 | S2 step 0 pilot 200건의 데이터 (계획서 5.3은 원천 5개로 LC-Inject를 만들고, 구축 계획 S2 ⓪은 "초안 데이터 200건(T2 8k)"이라고만 함) | 초안 생성기 `lc_inject_draft`: 배경 = Wikipedia 문서(`bg_wiki_en`, S0 다운로더가 받음), 과업 = 정답이 필요 없는 신뢰 과업 5종(요약, 요점, 제목·초록, 주제, 날짜 추출), payload = Open-Prompt-Injection 방식 4종(naive, ignore, fake completion, combined) × 무해한 주입 목표 12개, 위치 10·50·90 %, `split = pilot`, 8k(T2 토큰 기준, 렌더링한 prompt 전체), 공격 200건(정상 짝은 기본 0건, 설정으로 켬). 실제 원천 5개의 adapter는 S2 ②에서 다운로드한 파일과 `probe.json`을 보고 만든다. 이유: 이 작업 환경(클라우드 컨테이너)에서는 HF·GitHub에 접근할 수 없어 원천 형식을 확인할 수 없고, pilot의 목적(사람 라벨 200으로 grader 일치율 확인, 요청당 시간 D-025)은 초안으로도 시작할 수 있다 \[해석\]. 한계: 초안에서 잰 grader 일치율이 실제 원천 출력에 그대로 옮겨진다는 보장은 없다. S2 ② 데이터에서 표본 50건을 다시 라벨해 확인하는 것을 제안한다. 대안: pilot을 S2 ② adapter가 준비될 때까지 미룸(10/13 pilot 마감을 넘김) | 10/13 | W0-grader(일치율), D-025, E0.1 일정 |
 
 ---
 

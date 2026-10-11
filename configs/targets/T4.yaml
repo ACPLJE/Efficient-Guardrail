@@ -1,0 +1,19 @@
+# T4 (optional): MoE target with sliding/full attention alternation (plan 6.1, D-037).
+target_id: T4
+hf_repo: openai/gpt-oss-20b
+revision: null            # null = HF cache refs/main; lineage records the resolved snapshot sha
+n_layers: 24
+n_q_heads: 64
+n_kv_heads: 8
+max_context: 131072
+# expected alternation (12 sliding-window layers with a 128-token window, 12 full layers); the loader
+# takes the real list from config.layer_types and compares (verify: true -> warning on mismatch)
+layer_attn_kind: [sliding, full, sliding, full, sliding, full, sliding, full, sliding, full, sliding, full,
+                  sliding, full, sliding, full, sliding, full, sliding, full, sliding, full, sliding, full]
+tracked8: null            # D-037: upper_half / tracked8 are chosen among full layers only, from config.layer_types at load
+dtype: bfloat16
+verify: true
+notes: >-
+  To verify: layer order of config.layer_types (which layers are sliding), the chat template (harmony
+  format, reasoning channels) and how text spans map through it. Weights ship as MXFP4; on Ada the HF path
+  dequantises to bf16. Record keeps the attention-sink mass separately (D-037).

@@ -3,8 +3,12 @@ tests/test_ag_checks.py
 tests/test_ag_chunking.py
 tests/test_ag_config.py
 tests/test_ag_events_schema.py
+tests/test_ag_hf_reference_system.py
+tests/test_ag_hf_reference_target.py
 tests/test_ag_hit_at_k.py
+tests/test_ag_label_sheet.py
 tests/test_ag_latest_rejects_mock.py
+tests/test_ag_lc_inject_draft.py
 tests/test_ag_lineage.py
 tests/test_ag_mock_end_to_end.py
 tests/test_ag_mock_system_modes.py
@@ -16,6 +20,7 @@ tests/test_ag_record_roundtrip.py
 tests/test_ag_render.py
 tests/test_ag_selector.py
 tests/test_ag_serde.py
+tests/test_ag_targets_config.py
 tests/test_ag_virtual_clock.py
 tests/test_ag_window_map.py
 tests/test_correctness.py

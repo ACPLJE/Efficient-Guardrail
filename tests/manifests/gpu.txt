@@ -1,1 +1,2 @@
+tests/gpu/test_ag_hf_reference_t2_gpu.py
 tests/gpu/test_ag_oracle_gpu.py

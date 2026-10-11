@@ -11,6 +11,7 @@ _REGISTRY: dict[str, type[System]] = {}
 # impl name -> module that registers it (imported lazily so heavy deps load only when used)
 _BUILTIN = {
     "mock": "ag.systems.mock_system",
+    "hf_reference": "ag.systems.hf_reference",
 }
 
 

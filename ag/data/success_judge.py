@@ -43,7 +43,23 @@ class MockSuccessJudge(SuccessJudge):
         )
 
 
+class PendingSuccessJudge(SuccessJudge):
+    """No verdict yet: attack_success and utility stay None until human labels or the validated grader
+    (W0-grader, plan 5.3 #7) fill them. Metrics leave None out of their denominators (ag.metrics.quality)."""
+
+    name = "pending@1"
+
+    def judge(self, req: Request, gen: Generation) -> SuccessResult:
+        return SuccessResult(attack_success=None, utility=None, judge=self.name,
+                             raw={"reason": "awaiting human labels / grader (W0-grader)"})
+
+
+SUCCESS_JUDGES: tuple[type[SuccessJudge], ...] = (MockSuccessJudge, PendingSuccessJudge)
+
+
 def get_success_judge(name: str) -> SuccessJudge:
-    if name in ("mock", "mock@1"):
-        return MockSuccessJudge()
-    raise KeyError(f"unknown success judge {name!r} (S1 has only 'mock')")
+    """By "<name>" or "<name>@<version>" (exp.success_judge)."""
+    for cls in SUCCESS_JUDGES:
+        if name in (cls.name, cls.name.split("@", 1)[0]):
+            return cls()
+    raise KeyError(f"unknown success judge {name!r}; known: {[c.name for c in SUCCESS_JUDGES]}")

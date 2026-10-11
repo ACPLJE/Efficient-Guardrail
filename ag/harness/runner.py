@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -40,17 +41,78 @@ from ag.systems.registry import create_system
 _INDEX_LOCK = threading.Lock()
 
 
+def _common_params(job: Mapping[str, Any], data: Mapping[str, Any], *, split: str, source: str,
+                   max_new_default: int) -> dict[str, Any]:
+    return {"n_pairs": int(data.get("n_attack", 4)), "n_benign": int(data.get("n_benign", data.get("n_attack", 4))),
+            "length_classes": list(data.get("length_classes") or ["1k"]), "split": data.get("split", split),
+            "source": data.get("source", source), "seed": int(data.get("seed", 0)),
+            "max_new_tokens": int((job.get("fairness") or {}).get("max_new_tokens", max_new_default)),
+            "sink": data.get("sink", "stream")}
+
+
+def _gen_mock_lc_inject(job: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[list[Request], dict]:
+    params = _common_params(job, data, split="test", source="mock", max_new_default=64)
+    return mock_lc_inject.generate(**params), params
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _background_path(p: str) -> Path:
+    """Env vars expanded (FileNotFoundError with the download hint, ag.data.lc_inject.background); a
+    relative path that is not under the cwd is tried against the repository root (smoke configs)."""
+    from ag.config.schema import REPO
+    from ag.data.lc_inject.background import resolve_path
+    try:
+        return resolve_path(p)
+    except FileNotFoundError:
+        alt = REPO / os.path.expandvars(p)
+        if not Path(os.path.expandvars(p)).is_absolute() and alt.is_file():
+            return alt
+        raise
+
+
+def _gen_lc_inject_draft(job: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[list[Request], dict]:
+    """Draft LC-Inject (S2 step 0): background docs + trusted tasks, length-fitted with the job target's
+    tokenizer and chat template (ag.targets.registry.length_fn_for)."""
+    from ag.data.lc_inject import draft
+    from ag.targets.registry import length_fn_for
+    params = _common_params(job, data, split="pilot", source="lc_draft", max_new_default=256)
+    for k in ("tolerance", "positions", "attack_types"):
+        if k in data:
+            params[k] = tuple(data[k]) if isinstance(data[k], list) else data[k]
+    given = data.get("background_paths")
+    if not given:
+        raise ValueError("data generator lc_inject_draft needs data.background_paths")
+    given = [given] if isinstance(given, str) else [str(p) for p in given]
+    paths = [_background_path(p) for p in given]
+    flags = (job.get("system") or {}).get("flags") or {}
+    length_fn = length_fn_for(str(job["target"]), model_path=flags.get("model_path"), targets_dir=flags.get("targets_dir"))
+    reqs = draft.generate(**params, background_paths=[str(p) for p in paths], length_fn=length_fn)
+    # manifest: paths as written in the config (not expanded) + the content hash of each file
+    return reqs, {**params, "target": str(job["target"]), "background_paths": given,
+                  "background_sha256": {g: _sha256_file(p) for g, p in zip(given, paths)}}
+
+
+# data.generator -> fn(job, data) -> (requests, manifest params)
+GENERATORS = {"mock_lc_inject": _gen_mock_lc_inject, "lc_inject_draft": _gen_lc_inject_draft}
+
+# system flag engine -> lineage producer (Records and S are matched by producer, SPEC 4.9, 6.1)
+PRODUCERS = {"mock": "mock", "hf": "reference"}
+
+
 def build_requests(job: Mapping[str, Any]) -> tuple[list[Request], dict]:
     data = dict(job.get("data") or {})
     gen = data.get("generator", "mock_lc_inject")
-    if gen != "mock_lc_inject":
-        raise NotImplementedError(f"data generator {gen!r} is S2 work (S1 has mock_lc_inject only)")
-    params = {"n_pairs": int(data.get("n_attack", 4)), "n_benign": int(data.get("n_benign", data.get("n_attack", 4))),
-              "length_classes": list(data.get("length_classes") or ["1k"]), "split": data.get("split", "test"),
-              "source": data.get("source", "mock"), "seed": int(data.get("seed", 0)),
-              "max_new_tokens": int((job.get("fairness") or {}).get("max_new_tokens", 64)),
-              "sink": data.get("sink", "stream")}
-    return mock_lc_inject.generate(**params), {"generator": gen, **params}
+    if gen not in GENERATORS:
+        raise NotImplementedError(f"data generator {gen!r} is not implemented; known: {sorted(GENERATORS)}")
+    reqs, params = GENERATORS[gen](job, data)
+    return reqs, {"generator": gen, **params}
 
 
 def _shard(reqs: Sequence[Request], shard: int, n: int) -> list[Request]:
@@ -219,8 +281,9 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
     sysd = jr["system"]
     system = create_system(sysd["impl"])
     flags = sysd["flags"]
+    engine = str(flags.get("engine", "mock"))
     lin = build_lineage(job.run_id, job.exp_id, job.config_hash, clock=clock.kind, seed=job.seed,
-                        producer="mock" if flags.get("engine", "mock") == "mock" else str(flags.get("engine")),
+                        producer=PRODUCERS.get(engine, engine),
                         model_sha={}, data_manifest_sha=sha, engine_version=flags.get("engine", "mock"),
                         threshold_ids=[jr.get("operating_point", "F5")], parent_run_ids=job.parent_run_ids)
     events_path = run_dir / "events.jsonl"
@@ -234,13 +297,20 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
     collector = Collector(job.run_id, events_path)
     records = RecordStore(run_dir / "records", job.run_id)
     ctx = RunContext(job.run_id, job.exp_id, run_dir, clock, job.seed, lin, records, collector.emit, log, attempt)
-    system.setup(SystemConfig(sysd["system_id"], sysd["impl"], flags, exp=jr), ctx)
-    info = system.info()
-    lin = dataclasses.replace(lin, model_sha=dict(info.model_sha), shim_active=info.shim_active, patch_sha=info.patch_sha)
     try:
+        system.setup(SystemConfig(sysd["system_id"], sysd["impl"], flags, exp=jr), ctx)
+        info = system.info()
+        lin = dataclasses.replace(lin, model_sha=dict(info.model_sha), shim_active=info.shim_active,
+                                  patch_sha=info.patch_sha,
+                                  engine_version=info.flags.get("engine_version") or lin.engine_version,
+                                  placement=dict(info.placement) or lin.placement)
         lin, _ = open_lineage(run_dir, lin)
     except Exception:
-        collector.close()
+        collector.close()       # no stray writer thread (and no loaded model) after a refused setup or resume
+        try:
+            system.teardown()
+        except Exception:
+            log.exception("teardown after a failed setup")
         raise
     ctx.lineage = lin
     atomic_write_text(run_dir / "resolved.yaml", yaml.safe_dump(dict(jr), sort_keys=True))

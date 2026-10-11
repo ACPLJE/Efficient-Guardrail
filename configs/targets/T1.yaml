@@ -1,0 +1,15 @@
+# T1: main target (plan 6.1). Structure values from the HF config [literature]; tracked8 per D-031.
+target_id: T1
+hf_repo: meta-llama/Llama-3.1-8B-Instruct
+revision: null            # null = HF cache refs/main; lineage records the resolved snapshot sha
+n_layers: 32
+n_q_heads: 32
+n_kv_heads: 8
+max_context: 131072
+layer_attn_kind: full
+tracked8: [16, 18, 20, 22, 25, 27, 29, 31]   # U[round(i*(|U|-1)/7)], U = layers 16..31 (D-031)
+dtype: bfloat16
+verify: false
+notes: >-
+  Gated on HF (accept the licence, download on the login node with HF_TOKEN). Chat template trims message
+  content (`content | trim`) and prepends a dated system preamble: data generators must strip segment texts.

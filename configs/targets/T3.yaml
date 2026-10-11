@@ -1,0 +1,18 @@
+# T3: large target with tool use, 2 GPUs (plan 6.1). tracked8 per D-031.
+target_id: T3
+hf_repo: mistralai/Mistral-Small-3.2-24B-Instruct-2506
+revision: null            # null = HF cache refs/main; lineage records the resolved snapshot sha
+n_layers: 40
+n_q_heads: 32
+n_kv_heads: 8
+max_context: 131072
+layer_attn_kind: full
+tracked8: [20, 23, 25, 28, 31, 34, 36, 39]   # U[round(i*(|U|-1)/7)], U = layers 20..39 (D-031)
+dtype: bfloat16
+verify: true
+notes: >-
+  To verify before S3: the checkpoint is a multimodal Mistral3 model (text values live under text_config;
+  AutoModelForCausalLM may not load it), the HF tokenizer format (tekken vs. tokenizer.json) and whether a
+  fast tokenizer with offset mapping exists (SPEC A-03), and whether the chat template accepts consecutive
+  user messages (system + user task + user document) or requires strict user/assistant alternation.
+  Needs 2 GPUs (TP-2, D-021); the HF reference path here is single-device only.

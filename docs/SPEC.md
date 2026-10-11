@@ -9,6 +9,7 @@
 **변경 이력**
 
 - v1 (2026-10-10): 첫 초안.
+- v1.3 S2 step 0 (2026-10-11): 실제 모델 B0 생성 경로. `HFReferenceTarget`은 `ag/reference/hf_target.py`(4.3), 타깃 설정 `configs/targets/*.yaml`, 시스템 `hf_reference`(9.2), 초안 생성기 `lc_inject_draft`(8.1, D-041), 판정 대기 judge `pending@1`과 `n_unlabelled`(4.9, 6.1), lineage producer `reference`, `ag.harness.run`의 exit 4(자산 없음).
 - v1.3 (2026-10-11): S1 걷는 뼈대 구현에서 SPEC이 정하지 않았던 세부를 적었다. `schema_version`은 1 그대로다(첫 실데이터 기록 전, 14절). NB = 1이면 창 1개(1.1), 이벤트 `payload` 키 관례(3.2), `SystemConfig`(4.2), `mass_threshold`의 S1 정의(4.5, D-039 열림), mock judge의 지연 모형 `Judge.latency_ns`(4.6), `hits.jsonl`·`outcomes_run.jsonl`의 추가 열과 hit 행의 `variant_id`에서 k 제외(7.3), `plots/numbers.py` → `plots/abstract_numbers.py`(7.4). PR 리뷰 반영: `hits.jsonl`에 `source` 열(bootstrap 층화), `config_hash`에서 반복 횟수 `repeats` 제외(8.3), 실행 시 `--ts`의 jobs 파일과 run_id가 다르면 exit 2(7.1), resume는 `outcomes_run` 행까지 있어야 완료로 봄과 끊긴 마지막 줄 정리(7.1), checks 추가(`one_decision_per_chunk`, `all_requests_have_outcomes`, 마감 검사를 block된 chunk까지 확장, 7.4), YAML `off`/`on` 불리언을 enum 문자열로 되돌리고 값 검사, `block_before_generation`은 ledger가 필요 없는 선택 규칙만(9.1), B0의 판정 전 노출 토큰은 `not_applicable`(6.2). 전체 코드 재검증 반영: 동시 `System.run`에서 job id를 요청별로 셈(3.2), 수집기 close 의미(3.5), 3.4 #9의 oracle 예외, index append의 flock(5.4), hit@k 분모는 X 전체(6.1), 오류 단위 집계 `error_units`(6.1·7.4), `latest.txt`에서 `evaluation_only` 제외(7.1), checks 추가(`fairness_knobs_equal`를 expand 직후 비교해 exit 3, `s_source_available`, cache unsafe verdict로 release한 chunk, 7.4·8.3), `sweep.include` 구현(8.1), 실험 파일의 `clock`·`success_judge`·`data.generator`·`data.source`·`data.sink`·`data.seed` 키와 값 검사(8.1), Record 층과 선택 층 대조(4.5), mock의 `judge_windows`는 타깃 격자만(9.1).
 - v1.2 (2026-10-10): v1.1 재검증에서 남은 지적 35개를 반영했다(run_id에 target·shard·repeat, 운영점별 Outcome, FPR(inj) 사유 집합, tool sink 측정 지점, 조각별 hit, 차등 결과 파일 분리, resume 키 확장 등).
 - v1.1 (2026-10-10): 독립 검토 3건(실험 적용 범위, 지표 정확성, 구현 가능성)에서 확인된 지적 64개를 반영했다. 주요 변경: 다중 호출 episode 경로(2.5, 4.12), offline 변형 식별자 `variant_id`(2.4, 7), hit@k를 표준 정의와 서빙 합집합으로 분리(6.1), 판정 규칙을 `score > τ`로 통일(2.3), "같은 ASR" 운영점과 offline gate 재생(6.1), TPOT(보임) 분모 수정(6.2), 판정 전 노출 토큰의 V 정의 수정(6.2), goodput을 위반 비율로 정의(6.3), 보조 타입과 직렬화 규약(2.0, 2.7), 이벤트 수집기와 가상 시계 의미(3.5, 4.1), 단계별 결과 파일(7.3), sweep 축 명시(8.1), 유해 위협 라벨(2.1, 6.1), 2·4-GPU 구성(8.1), Record 크기 재계산(5.2).
@@ -553,7 +554,10 @@ class Target(abc.ABC):
     def info(self) -> Mapping[str, Any]: ...
 ```
 
-- `HFReferenceTarget`(`ag/reference/ledger_oracle.py`): prefill은 SDPA, decode 단계만 eager attention으로 새 토큰의 attention 행을 얻어 128토큰 블록으로 합산한다(계획서 6.4, 8.2). 첫 토큰 행(`first_token = True`)은 prefill 마지막 위치의 q·K를 따로 계산해 얻는다. 128k에서 전체 logits를 만들지 않도록 `logits_to_keep=1` 또는 chunked prefill을 쓴다(전체 logits는 약 33 GB \[계산\]).
+- `HFReferenceTarget`(`ag/reference/hf_target.py`, v1.3 S2 step 0; 처음 안은 `ledger_oracle.py`): prefill은 SDPA, decode 단계만 eager attention으로 새 토큰의 attention 행을 얻어 128토큰 블록으로 합산한다(계획서 6.4, 8.2). 첫 토큰 행(`first_token = True`)은 prefill 마지막 위치의 q·K를 따로 계산해 얻는다. 128k에서 전체 logits를 만들지 않도록 `logits_to_keep=1` 또는 chunked prefill을 쓴다(전체 logits는 약 33 GB \[계산\]).
+  - **S2 step 0 구현 범위**: attention 기록 없는 B0 생성만 한다. `record`를 주면 `NotImplementedError`(ledger 기록은 S2 step 3, E0.1). greedy 수동 루프와 KV cache, prefill은 `logits_to_keep=1`, EOS(생성 설정과 tokenizer의 eos id)에서 멈추고 EOS 토큰도 출력에 넣는다. `generate(..., ignore_eos: bool = False)` 인자를 더했다(성능 workload의 고정 출력 길이). 시각은 CUDA에서 `synchronize` 뒤에 찍고 `t_token_ns[0] == t_prefill_done_ns`다. 시스템 `hf_reference`는 `req.ignore_eos` 또는 실험 `fairness.ignore_eos`가 참이면 EOS를 무시한다. `token_texts(ids)`는 이어 붙이면 `text`와 정확히 같은 토큰별 조각을 준다(byte-level BPE에서 한 글자가 두 토큰에 걸치면 뒤 토큰으로 미룬다).
+  - **chat template**: segment 하나가 메시지 하나다. `document`는 `user` 메시지로 보낸다(4.12와 같음). 각 segment 텍스트는 렌더링된 문자열에 그대로 있어야 하고(`str.find`로 위치를 찾음) 없으면 오류다. Llama 3.1 template은 내용을 `trim`하므로 생성기는 segment 텍스트를 `strip()`해서 넣는다.
+  - 타깃 설정 `configs/targets/<id>.yaml`: `target_id, hf_repo, revision, n_layers, n_q_heads, n_kv_heads, max_context, layer_attn_kind, tracked8, dtype, verify, notes`. T1–T3의 `tracked8`은 D-031 식으로 적고 `resolve_layers`와 같은지 테스트한다. T4는 `layer_types`에서 정한다(D-037). `tiny-hf`는 CPU 테스트용 4층 모델이다(`ag/reference/tiny_hf.py`, 처음 쓸 때 `${AG_CACHE:-~/.cache/ag}`에 만든다).
 - `forced_output`은 teacher forcing이다. E2.1에서 엔진 출력을 참조 구현에 넣어 같은 토큰 열 위의 질량을 비교하고, loo scorer는 원 출력의 log 확률을 다시 잰다. `drop_tokens`는 prompt에서 지울 토큰 span이다(loo).
 - **mock**:
   - `MockTokenizer`(`ag/targets/mock.py`): 결정적, 공백 단위, offset mapping을 제공하고, id를 `vocab_size = 512`로 접어 `tiny_qwen3`와 맞는다. mock chat template은 role마다 고정 머리 토큰 몇 개를 둔다.
@@ -757,6 +761,7 @@ class SuccessJudge(abc.ABC):
 
 - 원천별 원 판정기(AgentDojo `security`/`utility`, InjecAgent, BIPIA 등)를 먼저 쓰고, 없으면 LLM grader(Qwen3-8B, D-005)를 쓴다. `H_user`(사용자의 유해 요청)의 성공은 출력 유해 grader(Qwen3Guard-Gen)로 판정한다.
 - **sink에 도달한 출력만** 판정한다(`text_delivered`, `tool_calls_delivered`). block된 chunk의 내용은 쓰지 않는다(계획서 8.1).
+- (v1.3 S2 step 0) `pending@1`: 사람 라벨이나 grader를 기다리는 run(W0-grader pilot)용. `attack_success = utility = None`을 쓴다. ASR·utility는 None을 분모에서 빼고 그 수를 `n_unlabelled`로 적는다.
 - grader는 GPU job이므로 `run` 안에서 부르지 않는다. 실행이 끝난 뒤 `ag.metrics.score_outcomes(run_dir)`가 부르고 `success.jsonl`에 쓴다(7.3).
 - S를 쓰는 run(hit@k, recall, 운영점)은 B0 run의 `run_id`를 `lineage.parent_run_ids`에 넣어야 한다. S는 같은 target, 같은 producer의 B0 생성과 그 success 결과에서 정한다(6.1).
 
@@ -1113,6 +1118,7 @@ slurm: { gres: "gpu:1", time: "24:00:00", shards: 8 }
 - **offline 축**은 `sweep.offline_axes`에 적은 키이고, job을 늘리지 않고 한 run 안에서 계산해 `variant_id`로 구분한다.
 - 두 목록에 없는 리스트는 그냥 값이다(`sources`, `outputs`, `scorers` 등).
 - 곱집합 밖의 조합은 `sweep.include: [{targets: T1, data.length_classes: 128k, data.n_attack: 100}]`로 적거나 별도 실험 파일(E0.1-128k)로 둔다. 항목마다 (system, target, seed, repeat, shard)의 job들이 곱집합 뒤에 붙는다. 항목의 `systems`·`targets`는 한 값 또는 목록이고, 없으면 실험의 목록 전체다. 나머지 키는 점 표기로 resolved 실험 설정을 덮는다. 곱집합과 run_id가 겹치면 오류다(v1.3).
+- S2 step 0 키(v1.3): `data.generator: lc_inject_draft`(D-041)는 `data.background_paths`(문서 파일 목록, `${AG_SOURCES}` 같은 환경 변수를 펼침), 선택 `data.tolerance`(기본 0.02), `data.positions`, `data.attack_types`를 받는다. 길이는 job의 타깃 tokenizer와 chat template으로 렌더링한 prompt 전체 토큰 수가 `[n·(1−tolerance), n]` 안에 들도록 맞춘다. manifest params에 경로(펼치기 전)와 파일별 `background_sha256`, `target`을 남긴다.
 - S1에서 쓰는 추가 키(v1.3): `clock: virtual | monotonic`(기본 monotonic, `--clock`이 우선), `success_judge`(4.9의 판정기 이름), `data.generator`(mock 데이터 생성기 이름), `data.source`·`data.sink`·`data.seed`(mock 요청의 `source`, 2.1의 `sink`, 생성기 seed). 로더는 `data.split`, `record.layers`, `record.precision`, `selector.rule`, `clock` 값이 허용 집합인지 읽을 때 검사한다.
 - `topology`도 job 축이 될 수 있다(E4.3의 GPU 1·2·4). 기본안(D-034): n = 2에서 B0·B1a·B1c·B3는 타깃 replica 2(같은 GPU에 guard·judge 공존), AG는 "replica 2 공존"과 "타깃 1 + guard·judge 전용 1"을 둘 다 돌려 보고한다. n = 4는 B0 계열이 replica 4, AG는 "replica 4 공존"과 "replica 2 + 전용 2"(D-034). lineage에 `topology_id`.
 - `closed_loop.concurrency`는 리스트를 받아 job 축이 될 수 있다(E2.3의 batch 1·4·16).
@@ -1182,7 +1188,7 @@ B1a, B1b, B1c, B-full, B-oracle, N1–N6, AG 누적 ablation은 모두 AG 플러
 
 | ID | 구현 | 모드 | 핵심 설정 | 내는 이벤트(요지) | 쓰는 실험 |
 | --- | --- | --- | --- | --- | --- |
-| B0 | `b0_engine`(무수정 SGLang) 또는 `hf_reference` | live | patch 없음 | TOKENS(client)마다 chunk 하나(3.3) | 전부. S의 정의 |
+| B0 | `b0_engine`(무수정 SGLang) 또는 `hf_reference`(`configs/systems/b0_ref.yaml`, v1.3 S2 step 0: engine `hf`, lineage producer `reference`, Record 없음) | live | patch 없음 | TOKENS(client, `hf_reference`는 engine 시각)마다 chunk 하나(3.3) | 전부. S의 정의 |
 | B-oracle | AG overlay | offline 또는 evaluation_only live | `selector.rule = oracle` | 선택 창 = P(r) | E3.1 |
 | B-full | AG overlay | offline(품질), live(지연) | `selector.rule = all`, `judge = J2`, `block_before_generation`, `output_guard = off` | 모든 창 INJ_JUDGE | E0.2, E1.2, E1.5, E3.1, E3.4, E4.2 |
 | B1a | AG overlay(8.2) | offline(품질), live(지연) | `block_before_generation`, `harm_scan = blocking`, `harm_guard = sliding`, `output_guard = off`, `selector.rule = all`, `judge = J1`, 창 두 체계 | 생성 전 모든 JOB_DONE 뒤 PREFILL_START | E0.2, E1.2, E3.1, E3.4, E4.1–E4.5 |
@@ -1228,7 +1234,7 @@ B1a, B1b, B1c, B-full, B-oracle, N1–N6, AG 누적 ablation은 모두 AG 플러
 
 | 실험 | 모드 | 시스템·구성 요소 | 입력 | 산출 파일 | 지표(6절) |
 | --- | --- | --- | --- | --- | --- |
-| W0-grader | live(B0) + 사람 라벨 | B0(`hf_reference`), SuccessJudge(grader) | pilot 200 | success, `grader_agreement.json` | 일치율 |
+| W0-grader | live(B0) + 사람 라벨 | B0(`hf_reference`), SuccessJudge(grader; 라벨 전에는 `pending@1`) | pilot 200(`configs/exp/w0_grader_pilot.yaml`, T2 8k, `lc_inject_draft`, D-041) | success, `label_sheet.csv`(`scripts/export_label_sheet.py`), `grader_agreement.json` | 일치율 |
 | W0-mooncake | 분석 | `traces/mooncake.py` | Mooncake trace | `trace_stats.json` | 길이 분포 |
 | E0.1 | live(참조) + offline | B0 `hf_reference` + Record, scorer `ledger`, selector offline 축 | LC-Inject 8k·32k, 128k 100 | records, hits, success | hit@k[d], hit@k[union], hit@k(chunk), X ∈ {S, A∖S}, 무작위 기준 |
 | E0.2 | offline | J1·J2 offline runner(J2는 첫 서빙 chunk), B1a·B-full·AG offline | E0.1 records | window_scores, hits | R80 FPR(inj), ROC, 판정 창 수 |

@@ -48,3 +48,30 @@ GPU 테스트(`tests/gpu/`)는 CUDA가 없으면 skip된다. 그림 fixture(`tes
 ## 5. S1에서 stub으로 둔 것
 
 실제 Target·Judge, `sglang_client`(S1E), judge pool·scheduler(MockSystem 안의 단일 worker 모형), EngineAdapter replay(S3)·sglang(S3E), 집계 B·rollout(S2), 실모델 참조 경로(SDPA prefill, S2), LG 유해 경로 연결(S3), `engine_integration/`(README만).
+
+## 6. S2 step 0: 실제 모델 B0 pilot (W0-grader, D-041)
+
+T2(Qwen3-4B-Instruct-2507)로 8k 초안 요청 200건을 생성한다. 출력은 사람이 라벨해 grader 일치율(W0-grader)을 재는 데 쓴다. 규모는 CLAUDE.md 3.4 순서대로 키운다.
+
+```bash
+# 0) 로그인 노드: T2와 배경 문서 받기 (S0 다운로더, env/ag.env에 AG_SOURCES)
+bash slurm/ag_download_login.sh --stage pilot
+
+# 1) CPU 연기 시험: 작은 로컬 HF 모델(tiny-hf)로 같은 경로 (GPU·다운로드 불필요)
+python -m ag.harness.run --config configs/exp/w0_grader_smoke.yaml
+
+# 2) GPU 1요청 (계산 노드, srun으로 바로)
+srun -p RTX6000ADA --qos=normal --gres=gpu:1 -c 8 -t 00:30:00 \
+  bash -c 'source slurm/ag_common.sh && $PY -m ag.harness.run --config configs/exp/w0_grader_pilot.yaml --limit 1'
+
+# 3) 200건 전량 (sbatch --test-only 뒤 제출)
+python agctl.py run --config configs/exp/w0_grader_pilot.yaml --sbatch --submit
+
+# 4) 라벨 시트 (run 디렉터리 안에 label_sheet.csv, label_sheet.jsonl)
+python scripts/export_label_sheet.py --run-dir $AG_OUT/raw/W0-grader/<run_id>
+```
+
+- 데이터는 초안이다(D-041): Wikipedia 배경 + 정답이 필요 없는 과업 5종 + Open-Prompt-Injection 방식 payload 4종 × 무해한 주입 목표 12개, 위치 10·50·90 %. 실제 원천 5개는 S2 ②.
+- 이 run의 `success.jsonl`은 `pending@1`이라 비어 있고(`attack_success = None`), `summary.json`의 ASR은 `n_unlabelled`로 남는다. 라벨과 grader 비교는 S2 ①.
+- 자산이 없으면 `ag.harness.run`은 exit 4와 함께 받을 명령을 알려 준다. ledger(attention) 기록은 아직 없다(S2 step 3, E0.1).
+- 요청당 시간(D-025)은 `events.jsonl`의 PREFILL_DONE·TOKENS 시각과 FINISHED `payload.perf`(peak 메모리, prefill·decode ns)에 있다.

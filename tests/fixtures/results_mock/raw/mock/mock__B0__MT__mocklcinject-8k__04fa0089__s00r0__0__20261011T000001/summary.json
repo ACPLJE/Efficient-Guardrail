@@ -64,6 +64,7 @@
     "ci_low": 0.16666666666666666,
     "den": 6,
     "n": 6,
+    "n_unlabelled": 0,
     "num": 3,
     "unit": "ratio",
     "value": 0.5
@@ -1229,6 +1230,7 @@
     "ci_low": 1.0,
     "den": 2,
     "n": 2,
+    "n_unlabelled": 0,
     "num": 2,
     "unit": "ratio",
     "value": 1.0
@@ -1238,6 +1240,7 @@
     "ci_low": 0.16666666666666666,
     "den": 6,
     "n": 6,
+    "n_unlabelled": 0,
     "num": 3,
     "unit": "ratio",
     "value": 0.5

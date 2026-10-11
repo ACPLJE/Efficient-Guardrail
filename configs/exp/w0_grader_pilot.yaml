@@ -1,0 +1,30 @@
+# W0-grader pilot (plan 5.3 #7, 8.2 W0; build plan S2 step 0): 200 T2 outputs on draft LC-Inject attack
+# requests at 8k for human labelling (scripts/export_label_sheet.py), before the Qwen3-8B grader is trusted.
+# Scale-up order (CLAUDE.md 3.4): w0_grader_smoke.yaml on CPU -> this file with --limit 1 on one GPU -> all 200.
+#   python -m ag.harness.run --config configs/exp/w0_grader_pilot.yaml --limit 1
+# Needs $AG_SOURCES/bg_wiki_en/docs.jsonl.gz and Qwen/Qwen3-4B-Instruct-2507 in the HF cache (login node:
+# bash slurm/ag_download_login.sh --stage pilot).
+exp_id: W0-grader
+plan_ref: "5.3 #7, 8.2 W0; build plan S2 step 0"
+notes: "draft data (background docs + OPI payloads); success is pending until human labels / grader"
+outputs: [label_sheet]
+targets: [T2]
+systems: [b0_ref]
+data:
+  generator: lc_inject_draft
+  manifest: lcdraft
+  source: lc_draft
+  split: pilot
+  length_classes: [8k]
+  n_attack: 200
+  n_benign: 0
+  seed: 0
+  sink: stream
+  background_paths: ["${AG_SOURCES}/bg_wiki_en/docs.jsonl.gz"]
+fairness: { max_new_tokens: 256, temperature: 0.0, ignore_eos: false, dtype: bfloat16 }
+fairness_exempt: []
+success_judge: pending
+clock: monotonic
+repeats: 1
+seeds: [0]
+slurm: { gres: "gpu:1", time: "06:00:00", shards: 1 }

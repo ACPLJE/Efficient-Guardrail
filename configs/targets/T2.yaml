@@ -1,0 +1,15 @@
+# T2: small target, native 256k context (plan 6.1). Structure values from the HF config [literature]; tracked8 per D-031.
+target_id: T2
+hf_repo: Qwen/Qwen3-4B-Instruct-2507
+revision: null            # null = HF cache refs/main; lineage records the resolved snapshot sha
+n_layers: 36
+n_q_heads: 32
+n_kv_heads: 8
+max_context: 262144
+layer_attn_kind: full
+tracked8: [18, 20, 23, 25, 28, 30, 33, 35]   # U[round(i*(|U|-1)/7)], U = layers 18..35 (D-031)
+dtype: bfloat16
+verify: false
+notes: >-
+  Instruct (non-thinking) model: the chat template is rendered without extra kwargs. Pilot target of
+  S2 step 0 (W0-grader). ChatML template inserts message content verbatim.

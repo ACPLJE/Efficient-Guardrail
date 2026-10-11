@@ -1,0 +1,14 @@
+# B0 on the HF reference path (build plan S2 step 0): HF transformers, SDPA prefill + greedy decode with
+# the KV cache, no guard. No Records yet (ledger recording on this path is S2 step 3, E0.1).
+# Optional flags: model_path (a local snapshot dir instead of the target's hf_repo), device, dtype, targets_dir.
+system_id: B0
+impl: hf_reference
+flags:
+  engine: hf
+  gate: none
+  harm_scan: "off"
+  inj_path: "off"
+  output_guard: "off"
+  write_records: false
+  evaluation_only: false
+  attn_implementation: sdpa

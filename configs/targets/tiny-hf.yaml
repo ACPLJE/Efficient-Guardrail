@@ -1,0 +1,16 @@
+# Tiny local HF model for CPU smoke runs (CLAUDE.md 3.4). Built offline by ag.reference.tiny_hf and cached
+# under ${AG_CACHE:-~/.cache/ag}/tiny_hf/<template>-s0; sizes match lgs1.lgcore.model.tiny_qwen3.
+target_id: tiny-hf
+hf_repo: null
+revision: null
+build: tiny_hf
+template: chatml          # chatml (Qwen-like, verbatim content) | trim (Llama-3.1-like, content | trim)
+n_layers: 4
+n_q_heads: 4
+n_kv_heads: 2
+max_context: 4096
+layer_attn_kind: full
+tracked8: [2, 3]          # |upper_half| = 2 <= 8, so tracked8 = upper_half (ag.selector.layers)
+dtype: float32
+verify: false
+notes: Random weights, word-level tokenizer; for wiring tests only, never for reported numbers.
