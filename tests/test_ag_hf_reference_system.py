@@ -55,8 +55,9 @@ def smoke(tmp_path_factory):
     assert run_main(["--config", str(SMOKE), "--out", str(out), "--ts", TS, "--limit", "2"]) == 0
     d = next(p for p in (out / "raw" / "W0-smoke").iterdir() if p.is_dir() and p.name != "jobs")
     first = _events(d)
+    first_meta = load_json(d / "summary.json")["_meta"]
     assert run_main(["--config", str(SMOKE), "--out", str(out), "--ts", TS]) == 0
-    return out, d, first
+    return out, d, first, first_meta
 
 
 # ------------------------------------------------------------------------------------------------ configs
@@ -78,7 +79,7 @@ def test_configs_load_and_expand():
 
 # ------------------------------------------------------------------------------------------------ end to end
 def test_smoke_run_files_lineage_checks(smoke):
-    out, d, _ = smoke
+    out, d, _, _ = smoke
     for f in RUN_FILES:
         assert (d / f).exists(), f
     assert not (d / "records").exists() and not (d / "hits.jsonl").exists()
@@ -93,7 +94,7 @@ def test_smoke_run_files_lineage_checks(smoke):
 
 
 def test_smoke_events_tokens_text(smoke):
-    _, d, _ = smoke
+    _, d, _, _ = smoke
     per = by_request(_events(d))
     assert len(per) == 6
     for rid, evs in per.items():
@@ -113,7 +114,7 @@ def test_smoke_events_tokens_text(smoke):
 
 
 def test_smoke_outcomes_success_summary_manifest(smoke):
-    out, d, _ = smoke
+    out, d, _, _ = smoke
     live = rows(d / "outcomes_run.jsonl")
     assert sorted(r["request_id"].rsplit("/", 2)[1] for r in live) == ["a"] * 4 + ["b"] * 2
     for r in live:
@@ -125,7 +126,8 @@ def test_smoke_outcomes_success_summary_manifest(smoke):
     assert all(o["attack_success"] is None for o in rows(d / "outcomes.jsonl"))
     s = load_json(d / "summary.json")
     assert s["asr"]["value"] is None and s["asr"]["den"] == 0 and s["asr"]["n_unlabelled"] == 4
-    assert s["utility"]["n_unlabelled"] == 2 and s["_meta"]["n_A"] == 4 and s["_meta"]["n_S"] == 0
+    assert s["utility"]["n_unlabelled"] == 2 and s["_meta"]["n_A"] == 4
+    assert s["_meta"]["n_S"] is None and s["_meta"]["n_unlabelled_b0"] == 4      # S unknown, not empty
     assert s["_meta"]["system_info"]["engine"] == "hf" and s["_meta"]["checks_ok"] is True
     lin = load_json(d / "lineage.json")
     man = load_json(out / "raw" / "data" / lin["data_manifest_sha"] / "manifest.json")
@@ -136,7 +138,7 @@ def test_smoke_outcomes_success_summary_manifest(smoke):
 
 
 def test_smoke_resume_skips_done_requests(smoke):
-    out, d, first = smoke
+    out, d, first, _ = smoke
     assert len({e.request_id for e in first}) == 2 and {e.attempt for e in first} == {0}
     evs = _events(d)
     fins = [e for e in evs if e.type == E.FINISHED]
@@ -149,7 +151,7 @@ def test_smoke_resume_skips_done_requests(smoke):
 
 
 def test_smoke_label_sheet(smoke, tmp_path):
-    _, d, _ = smoke
+    _, d, _, _ = smoke
     spec = importlib.util.spec_from_file_location("export_label_sheet", ROOT / "scripts" / "export_label_sheet.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -180,7 +182,7 @@ def _ctx(tmp_path, sink: list):
 
 
 def _cfg(flags: dict | None = None, **exp) -> SystemConfig:
-    f = {**load_system("b0_ref")["flags"], **(flags or {})}
+    f = {**load_system("b0_ref_cpu")["flags"], **(flags or {})}          # device: cpu, also on GPU nodes
     e = {"target": "tiny-hf", "fairness": {"max_new_tokens": 6, "temperature": 0.0, "ignore_eos": False,
                                            "dtype": "float32"}, **exp}
     return SystemConfig("B0", "hf_reference", f, exp=e)
@@ -286,3 +288,12 @@ def test_pending_judge_and_none_in_rates():
     assert (u["num"], u["den"], u["n_unlabelled"]) == (1, 2, 2)
     none = q.asr([{**base, "unit_id": "x", "attack_success": None}])
     assert none["value"] is None and none["den"] == 0 and none["n_unlabelled"] == 1
+
+
+def test_limit_run_is_partial_until_resumed(smoke):
+    """--limit 2 covers 2 of the job's 6 requests: partial (never latest.txt); the resumed run is complete."""
+    _, d, _, first_meta = smoke
+    assert first_meta["limit"] == 2 and first_meta["n_done_requests"] == 2 and first_meta["partial"] is True
+    meta = load_json(d / "summary.json")["_meta"]
+    assert meta["limit"] is None and meta["n_done_requests"] == meta["n_expected_requests"] == 6
+    assert meta["partial"] is False

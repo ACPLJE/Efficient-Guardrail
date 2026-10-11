@@ -237,12 +237,13 @@ def _append_index(out_root: Path, job: Job, run_dir: Path) -> None:
 
 
 def latest_eligible(lineage: Mapping[str, Any], engine: str | None, checks_ok: bool,
-                    flags: Mapping[str, Any] | None = None) -> bool:
+                    flags: Mapping[str, Any] | None = None, partial: bool = False) -> bool:
     """latest.txt eligibility, defined only here (SPEC 7.1). evaluation_only runs (B-oracle) use the
-    answer key and never qualify (SPEC 9.1)."""
+    answer key and never qualify (SPEC 9.1); nor does a partial run (fewer outcomes rows than the job's
+    requests, e.g. a --limit smoke run of the same config_hash as the full run)."""
     return (lineage.get("clock") == "monotonic" and not lineage.get("code_dirty", True)
             and engine not in (None, "mock") and checks_ok
-            and not bool((flags or {}).get("evaluation_only", False)))
+            and not bool((flags or {}).get("evaluation_only", False)) and not partial)
 
 
 def run_job(job: Job, out_root: str | Path, *, cmd: str | None = None, log: logging.Logger | None = None,
@@ -274,6 +275,7 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
     reqs, sha = stamp(reqs)
     write_manifest(out_root, reqs, sha, generator=params["generator"], params=params)
     reqs = _shard(reqs, job.shard, job.n_shards)
+    expected_ids = {r.request_id for r in reqs}      # the job's requests; --limit runs a prefix of them
     if limit is not None:
         reqs = reqs[:limit]
 
@@ -350,11 +352,16 @@ def _run_job(job: Job, out_root: Path, run_dir: Path, jr: Mapping[str, Any], *, 
                         "" if has_s else f"parent B0 run {job.parent_run_ids} not indexed or not scored yet"))
     atomic_write_json(run_dir / "checks.json", [c.to_json() for c in checks])
     summary_path = run_dir / "summary.json"
+    # coverage of the job, not of this invocation: a --limit run later resumed without --limit becomes complete
+    n_done = len(expected_ids & {r["request_id"] for r in read_rows(run_dir / "outcomes_run.jsonl")})
+    partial = n_done < len(expected_ids)
     if summary_path.exists():
         s = json.loads(summary_path.read_text())
         s["_meta"]["system_info"] = info.to_json()
         s["_meta"]["checks_ok"] = all_ok(checks)
+        s["_meta"].update(limit=limit, n_expected_requests=len(expected_ids), n_done_requests=n_done,
+                          partial=partial)
         atomic_write_json(summary_path, s)
-    if latest_eligible(lin.to_json(), info.engine, all_ok(checks), info.flags):
+    if latest_eligible(lin.to_json(), info.engine, all_ok(checks), info.flags, partial):
         atomic_write_text(out_root / "raw" / job.exp_id / "latest.txt", job.run_id + "\n")
     return run_dir

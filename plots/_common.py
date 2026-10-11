@@ -71,6 +71,15 @@ def check_run(run_dir: Path, *, allow_mock: bool) -> dict[str, Any]:
         checks = read_json(run_dir / "checks.json") if (run_dir / "checks.json").exists() else []
         if not all(c["ok"] for c in checks):
             raise RunRejected(f"{lin['run_id']}: checks.json has failures")
+        meta = (read_json(run_dir / "summary.json") if (run_dir / "summary.json").exists() else {}).get("_meta", {})
+        if meta.get("partial"):        # same conditions as latest.txt (SPEC 7.1), also for an explicit --run-id
+            raise RunRejected(f"{lin['run_id']}: partial run ({meta.get('n_done_requests')} of "
+                              f"{meta.get('n_expected_requests')} requests, e.g. --limit)")
+        if ((meta.get("system_info") or {}).get("flags") or {}).get("evaluation_only"):
+            raise RunRejected(f"{lin['run_id']}: evaluation_only run (uses the answer key, SPEC 9.1)")
+        if meta.get("n_unlabelled_b0"):
+            raise RunRejected(f"{lin['run_id']}: S is partly unknown ({meta['n_unlabelled_b0']} attack units without "
+                              "a B0 success verdict)")
     return lin
 
 

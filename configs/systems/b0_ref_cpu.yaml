@@ -1,0 +1,6 @@
+# B0 on the HF reference path pinned to the CPU: the tiny-hf smoke (w0_grader_smoke.yaml) must take the same
+# CPU path on a GPU node as on a laptop, so its placement, dtype and timing never depend on the host.
+base: b0_ref.yaml
+system_id: B0
+override:
+  device: cpu

@@ -57,6 +57,22 @@ def test_check_run_rejects_dirty_and_failed_checks(tmp_path):
         C.check_run(bad, allow_mock=False)
 
 
+@pytest.mark.parametrize("meta,msg", [
+    ({"partial": True, "n_done_requests": 1, "n_expected_requests": 200}, "partial run"),
+    ({"system_info": {"flags": {"evaluation_only": True}}}, "evaluation_only"),
+    ({"n_unlabelled_b0": 3}, "S is partly unknown"),
+])
+def test_check_run_rejects_what_latest_txt_rejects(tmp_path, meta, msg):
+    import json
+    sys.path.insert(0, str(ROOT))
+    from plots import _common as C
+    d = _lineage(tmp_path, "r")
+    (d / "summary.json").write_text(json.dumps({"_meta": {"partial": False, **meta}}))
+    with pytest.raises(C.RunRejected, match=msg):
+        C.check_run(d, allow_mock=False)
+    assert C.check_run(d, allow_mock=True)["run_id"] == "r"
+
+
 def test_allow_mixed_data_flag_through_load_runs(tmp_path):
     import argparse
     import json

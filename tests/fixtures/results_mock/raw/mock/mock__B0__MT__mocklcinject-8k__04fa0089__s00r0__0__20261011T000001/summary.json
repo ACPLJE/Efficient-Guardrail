@@ -2,10 +2,16 @@
   "_meta": {
     "checks_ok": true,
     "default_variant_id": "11a747dc",
+    "limit": null,
     "n_A": 6,
     "n_S": 3,
+    "n_done_requests": 8,
     "n_error": 0,
+    "n_error_b0": 0,
+    "n_expected_requests": 8,
     "n_units": 8,
+    "n_unlabelled_b0": 0,
+    "partial": false,
     "run_id": "mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001",
     "s_source_run_id": "mock__B0__MT__mocklcinject-8k__04fa0089__s00r0__0__20261011T000001",
     "system_info": {

@@ -188,7 +188,7 @@ def test_two_paragraphs_overflow_cuts_the_second():
     assert p1.startswith(rest) and 0 < len(rest) < len(p1) and not rest.endswith(" ")
     assert doc_of(b).text == p0 + "\n\n" + rest
     big = " ".join(f"lead{i}" for i in range(600))
-    with pytest.raises(ValueError, match="cannot fit 512 tokens"):
+    with pytest.raises(ValueError, match="first paragraph of doc d alone renders"):
         draft.generate(n_pairs=1, length_classes=["512"], length_fn=mock_len, docs=[Doc("d", "", (big, p1))])
 
 
@@ -328,3 +328,29 @@ def test_deterministic(docs, reqs_2k):
     other = draft.generate(n_pairs=12, length_classes=["2k"], seed=5, length_fn=mock_len, docs=docs)
     assert [r.task_meta["background_doc_ids"] for r in other] != [r.task_meta["background_doc_ids"] for r in reqs_2k]
     assert [r.attack and r.attack.template_id for r in other] == [r.attack and r.attack.template_id for r in reqs_2k]
+
+
+def test_unusable_leading_doc_is_skipped_not_fatal(docs):
+    """A doc whose lead paragraph alone overflows the class used to fail the whole generate() when the pair's
+    permutation started with it; the pair now drops that doc deterministically and records it."""
+    import numpy as np
+    big = Doc("big", "", (" ".join(f"lead{i}" for i in range(700)), "short tail paragraph"))
+    pool = [big, *docs[:6]]
+    idx = next(i for i in range(200) if np.random.default_rng([0, i, 512]).permutation(len(pool))[0] == 0)
+    reqs = draft.generate(n_pairs=idx + 1, n_benign=0, length_classes=["512"], length_fn=mock_len, docs=pool)
+    r = reqs[idx]
+    assert r.task_meta["background_skipped_doc_ids"] == ["big"] and "big" not in r.task_meta["background_doc_ids"]
+    assert 512 * 0.98 <= mock_len(r.segments) <= 512
+    assert all(x.task_meta["background_skipped_doc_ids"] == [] for x in reqs[:idx])
+    again = draft.generate(n_pairs=idx + 1, n_benign=0, length_classes=["512"], length_fn=mock_len, docs=pool)
+    assert [x.to_json() for x in again] == [x.to_json() for x in reqs]
+
+
+def test_only_lead_overflow_is_retried(docs, monkeypatch):
+    """A pool that is simply too small is not retried with smaller pools (the error names the real pool)."""
+    calls = []
+    real = draft._fit_background
+    monkeypatch.setattr(draft, "_fit_background", lambda pool, *a, **k: calls.append(len(pool.order)) or real(pool, *a, **k))
+    with pytest.raises(ValueError, match="background pool too small: 2 docs"):
+        draft.generate(n_pairs=1, length_classes=["2k"], length_fn=mock_len, docs=docs[:2])
+    assert calls == [2]

@@ -38,3 +38,9 @@ def test_t2_renders_and_generates_on_gpu():
     assert out.t_token_ns[0] == out.t_prefill_done_ns and list(out.t_token_ns) == sorted(out.t_token_ns)
     assert tgt.last_timing["prefill_ns"] > 0 and out.peak_mem_bytes > 0
     assert "".join(tgt.token_texts(out.output_ids)) == out.text
+    # oracle check (E2.2 needs this loop to be exact): HF generate's greedy tokens on the same prompt ids
+    with torch.inference_mode():
+        ids = torch.tensor([list(rp.prompt_ids)], device=tgt.device)
+        ref = tgt.model.generate(ids, attention_mask=torch.ones_like(ids), do_sample=False, max_new_tokens=16,
+                                 eos_token_id=sorted(tgt.eos_ids), pad_token_id=sorted(tgt.eos_ids)[0])
+    assert list(out.output_ids) == ref[0, ids.shape[1]:].tolist()

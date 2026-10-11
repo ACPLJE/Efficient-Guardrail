@@ -10,7 +10,6 @@ falls back to no kwarg.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import time
@@ -132,13 +131,23 @@ def resolve_model_dir(model_path: str | os.PathLike, *, revision: str | None = N
                                 f"(HF_HOME={os.environ.get('HF_HOME')}): {type(e).__name__}: {e}; {DOWNLOAD_HINT}") from e
 
 
+# files that decide what a local (non-HF-cache) model directory computes and how it renders prompts
+# (exact names, no prefix globs: `hf download --local-dir` keeps timestamped vocab.json.metadata files under .cache/)
+LOCAL_ID_PATTERNS = ("*.safetensors", "*.bin", "config.json", "generation_config.json", "tokenizer.json",
+                     "tokenizer_config.json", "tokenizer.model", "special_tokens_map.json", "added_tokens.json",
+                     "chat_template.jinja", "chat_template.json", "vocab.json", "vocab.txt", "merges.txt",
+                     "*.tiktoken")
+
+
 def model_sha_of(model_dir: str | os.PathLike) -> str:
-    """The snapshot commit for an HF-cache path .../snapshots/<sha>, else "local:" + sha256(config.json)[:16]."""
+    """The snapshot commit for an HF-cache path .../snapshots/<sha>; otherwise "local:" + a fingerprint of the
+    weights, config, tokenizer and chat template (lgs1 dir_fingerprint, file hashes cached by size + mtime), so a
+    swapped checkpoint or an edited template is a different model_sha and resume refuses it (CLAUDE.md 3.3)."""
     p = Path(model_dir)
-    if p.parent.name == "snapshots" and p.name:
+    if p.name and p.parent.name == "snapshots" and p.parent.parent.name.startswith(("models--", "datasets--")):
         return p.name
-    cfg = p / "config.json"
-    return "local:" + (hashlib.sha256(cfg.read_bytes()).hexdigest()[:16] if cfg.exists() else "noconfig")
+    from ag.lineage_util import dir_fingerprint
+    return "local:" + dir_fingerprint(p, LOCAL_ID_PATTERNS)[:16]
 
 
 def load_tokenizer(model_dir: str | os.PathLike) -> Any:

@@ -196,3 +196,48 @@ def test_tiny_build_is_deterministic_and_cached(tmp_path, monkeypatch, tiny_dir)
     mtime = (p / "model.safetensors").stat().st_mtime_ns
     assert ensure_tiny_hf() == p and (p / "model.safetensors").stat().st_mtime_ns == mtime
     assert [x.name for x in p.parent.iterdir()] == ["chatml-s0"]      # no temporary build dir left
+
+
+def test_local_model_sha_tracks_weights_and_template(tmp_path):
+    a = build_tiny_hf(tmp_path / "a", seed=0, template="chatml")
+    b = build_tiny_hf(tmp_path / "b", seed=0, template="trim")
+    c = build_tiny_hf(tmp_path / "c", seed=1, template="chatml")
+    sha = {k: model_sha_of(p) for k, p in (("a", a), ("b", b), ("c", c))}
+    assert all(v.startswith("local:") for v in sha.values())
+    assert sha["a"] != sha["b"]            # same config.json, different chat template
+    assert sha["a"] != sha["c"]            # same config.json, different weights
+    assert model_sha_of(a) == sha["a"]     # stable (cached by size + mtime)
+    meta = a / ".cache" / "huggingface" / "download"
+    meta.mkdir(parents=True)
+    (meta / "vocab.json.metadata").write_text("1791700000.123")     # `hf download --local-dir` bookkeeping
+    assert model_sha_of(a) == sha["a"]
+    fake = tmp_path / "x" / "snapshots" / "my-ckpt"                 # not the HF cache layout: fingerprinted
+    fake.mkdir(parents=True)
+    (fake / "config.json").write_text("{}")
+    assert model_sha_of(fake).startswith("local:")
+
+
+def test_kv_cache_decode_matches_full_recompute_oracle(target, tmp_path):
+    """The KV-cache loop is the oracle side of E2.2 (SGLang tokens must match it). Check it against an independent
+    full recompute without a cache: (1) next-token logits after each of a varied forced token sequence through
+    the target's own cached forward, (2) the greedy tokens of generate() on the seed-1 tiny model, whose greedy
+    continuation varies (the seed-0 one is a constant token, which would make (2) vacuous)."""
+    import torch
+    rp = target.render(_req())
+    prompt = list(rp.prompt_ids)
+    forced = [5, 9, 13, 7, 21, 3, 17, 11]
+    with torch.inference_mode():
+        res = target._forward(torch.tensor([prompt]), None, prefill=True)
+        for i, tok in enumerate(forced):
+            res = target._forward(torch.tensor([[tok]]), res.past_key_values, prefill=False)
+            full = target.model(input_ids=torch.tensor([prompt + forced[:i + 1]]), use_cache=False).logits[0, -1]
+            assert torch.allclose(res.logits[0, -1], full, atol=1e-4, rtol=1e-4), f"step {i}"
+        t1 = HFReferenceTarget(build_tiny_hf(tmp_path / "s1", seed=1), target_id="tiny-hf", device="cpu")
+        rp1 = t1.render(_req())
+        out = t1.generate(rp1, 16, ignore_eos=True).output_ids
+        ids, ref = list(rp1.prompt_ids), []
+        for _ in range(16):
+            ref.append(int(t1.model(input_ids=torch.tensor([ids]), use_cache=False).logits[0, -1].argmax()))
+            ids.append(ref[-1])
+    assert len(set(ref)) > 1, "constant greedy continuation: pick another seed"
+    assert list(out) == ref

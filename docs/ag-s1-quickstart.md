@@ -74,4 +74,6 @@ python scripts/export_label_sheet.py --run-dir $AG_OUT/raw/W0-grader/<run_id>
 - 데이터는 초안이다(D-041): Wikipedia 배경 + 정답이 필요 없는 과업 5종 + Open-Prompt-Injection 방식 payload 4종 × 무해한 주입 목표 12개, 위치 10·50·90 %. 실제 원천 5개는 S2 ②.
 - 이 run의 `success.jsonl`은 `pending@1`이라 비어 있고(`attack_success = None`), `summary.json`의 ASR은 `n_unlabelled`로 남는다. 라벨과 grader 비교는 S2 ①.
 - 자산이 없으면 `ag.harness.run`은 exit 4와 함께 받을 명령을 알려 준다. ledger(attention) 기록은 아직 없다(S2 step 3, E0.1).
+- 라벨 시트: `label_sheet.csv`에서 =·+·-·@·TAB·CR로 시작하는 텍스트 칸(출력, 과업, 주입 문구 등)은 앞에 `'`가 붙는다(엑셀 수식 방지). 원문은 `label_sheet.jsonl`. 라벨을 채운 시트(또는 cp949 등으로 다시 저장해 읽을 수 없는 시트)는 다시 export해도 덮어쓰지 않는다(`--force`).
+- `--limit 1` run은 job의 요청을 다 덮지 못한 partial run이라 `latest.txt`와 그림에서 빠진다(`summary._meta.partial`). 같은 `--ts`로 나머지를 이어 돌리면 완전한 run이 된다.
 - 요청당 시간(D-025)은 `events.jsonl`의 PREFILL_DONE·TOKENS 시각과 FINISHED `payload.perf`(peak 메모리, prefill·decode ns)에 있다.

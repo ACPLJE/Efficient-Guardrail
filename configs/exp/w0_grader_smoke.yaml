@@ -7,7 +7,7 @@ plan_ref: "5.3 #7, 8.2 W0; build plan S2 step 0 (CPU smoke)"
 notes: "tiny random model; wiring only, never reported"
 outputs: [label_sheet]
 targets: [tiny-hf]
-systems: [b0_ref]
+systems: [b0_ref_cpu]          # device: cpu, so the smoke never depends on the host GPU
 data:
   generator: lc_inject_draft
   manifest: lcdraft

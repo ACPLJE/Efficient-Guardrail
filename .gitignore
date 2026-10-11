@@ -20,3 +20,5 @@ figures/*.pdf
 *.egg-info/
 build/
 /tmp*/
+*.safetensors
+agcache/

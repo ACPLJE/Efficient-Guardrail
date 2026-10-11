@@ -112,3 +112,51 @@ def test_rejects_rows_outside_the_manifest(run):
         f.write(json.dumps({"request_id": "lc_draft/pilot/512/000099/a/t00", "generation": None}) + "\n")
     with pytest.raises(ValueError, match="not in"):
         _script().build_rows(d)
+
+
+def test_formula_like_outputs_are_text_in_csv_and_exact_in_jsonl(run):
+    d, reqs = run
+    mod = _script()
+    rid = sorted(r.request_id for r in reqs if r.is_attack)[0]
+    rows_in = [json.loads(x) for x in (d / "outcomes_run.jsonl").read_text().splitlines()]
+    out_text = "- Apple\n- Banana\n- Cherry"
+    for x in rows_in:
+        if x["request_id"] == rid:
+            x["generation"]["text_delivered"] = out_text
+    (d / "outcomes_run.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows_in))
+    assert mod.main(["--run-dir", str(d)]) == 0
+    with open(d / "label_sheet.csv", encoding="utf-8-sig", newline="") as f:
+        cell = next(r for r in csv.DictReader(f) if r["request_id"] == rid)["output_text"]
+    assert cell == "'" + out_text
+    js = next(r for r in rows(d / "label_sheet.jsonl") if r["request_id"] == rid)
+    assert js["output_text"] == out_text
+    assert mod._cell("+1-555-0100") == "'+1-555-0100" and mod._cell("ok -") == "ok -" and mod._cell(0.5) == "0.5"
+
+
+def test_relative_run_dir_and_filled_sheet_is_not_overwritten(run, monkeypatch, capsys):
+    d, _ = run
+    mod = _script()
+    monkeypatch.chdir(d.parent)                                   # cd raw/W0-grader; --run-dir <run_id>
+    assert mod.main(["--run-dir", d.name]) == 0
+    with open(d / "label_sheet.csv", encoding="utf-8-sig", newline="") as f:
+        table = list(csv.reader(f))
+    table[1][COLUMNS.index("label_attack_success")] = "1"          # a labeller filled one cell
+    with open(d / "label_sheet.csv", "w", encoding="utf-8-sig", newline="") as f:
+        csv.writer(f).writerows(table)
+    assert mod.main(["--run-dir", d.name]) == 2 and "already has labels" in capsys.readouterr().err
+    with open(d / "label_sheet.csv", encoding="utf-8-sig", newline="") as f:
+        assert list(csv.reader(f))[1][COLUMNS.index("label_attack_success")] == "1"
+    assert mod.main(["--run-dir", d.name, "--force"]) == 0
+
+
+@pytest.mark.parametrize("content", [
+    "request_id;label_attack_success\nx;1\n".encode("utf-8"),            # re-saved with another delimiter
+    "request_id,label_attack_success\nx,예\n".encode("cp949"),            # re-saved as cp949 (Korean Excel)
+])
+def test_unreadable_existing_sheet_fails_closed_and_force_works(run, content, capsys):
+    d, _ = run
+    mod = _script()
+    (d / "label_sheet.csv").write_bytes(content)
+    assert mod.main(["--run-dir", str(d)]) == 2 and "already has labels" in capsys.readouterr().err
+    assert (d / "label_sheet.csv").read_bytes() == content
+    assert mod.main(["--run-dir", str(d), "--force"]) == 0

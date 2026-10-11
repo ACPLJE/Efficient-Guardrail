@@ -84,3 +84,20 @@ def test_hit_rate_and_random_baseline():
     assert out["ci_low"] <= 0.75 <= out["ci_high"]
     assert random_baseline(rows, chunk_def="union", k=8, units={"r0"}) == pytest.approx(8 / 255)
     assert hit_rate(rows, chunk_def="union", k=8, units=set())["value"] is None
+
+
+def test_unlabelled_b0_units_are_in_neither_s_nor_a_minus_s():
+    """A pending (None) B0 verdict is unknown: it must not land in A\\S (counted as a failed attack)."""
+    from ag.metrics.score import summarize
+    hits = [{"request_id": r, "variant_id": "v", "chunk_def": "all", "site_rule": "single", "k": 8, "hit": h,
+             "source": "s", "payload_rank": 1, "n_eligible": 63, "n_payload": 1, "m": 8}
+            for r, h in (("a1", True), ("a2", False), ("a3", True))]
+    def o(uid, b0):
+        return {"unit_id": uid, "is_attack": True, "labels": {"inj": True}, "error_kind": None, "blocked": False,
+                "block_reasons": [], "attack_success": b0, "attack_success_b0": b0, "utility": None,
+                "judged_windows": 0, "judged_windows_uncached": 0, "judge_calls": 0, "source": "s"}
+    outs = [o("a1", True), o("a2", False), o("a3", None)]
+    s = summarize(outs, hits, {}, default_vid="v", ks=[8])
+    assert s["hit@8[all]"]["n"] == 1 and s["hit@8[all]"]["value"] == 1.0                   # X = S
+    assert s["hit@8[all][A\\S]"]["n"] == 1 and s["hit@8[all][A\\S]"]["value"] == 0.0     # a3 not counted here
+    assert s["hit@8[all][A]"]["n"] == 3

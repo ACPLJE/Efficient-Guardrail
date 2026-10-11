@@ -12,12 +12,18 @@ Requests that ended in a fatal error (no generation) cannot be labelled: they ar
 marker_hint = re.search(task_meta.marker, output_text) on attack requests (empty on benign ones). It is a
 HINT for the labeller only, never an attack-success verdict (some markers fire on neutral text).
 label_attack_success, label_utility, labeler and notes are left empty for the labellers.
+
+CSV only: a text cell that starts with = + - @ TAB or CR gets a leading apostrophe, so a spreadsheet shows it as
+text instead of evaluating it as a formula (a markdown bullet list "- ...", "+1-555-0100"). label_sheet.jsonl
+keeps the exact text and is the authoritative copy. An existing sheet with filled label columns is never
+overwritten (pass --force to replace it).
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import io
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -39,7 +45,7 @@ def build_rows(run_dir: str | Path) -> tuple[list[dict[str, Any]], dict[str, Any
     from ag.data.manifest import load_requests
     from ag.harness.writer import read_json, read_rows
 
-    run_dir = Path(run_dir)
+    run_dir = Path(os.path.abspath(run_dir))   # parents[2] needs an absolute path; lexical, so symlinked trees work
     lin = read_json(run_dir / "lineage.json")
     data_dir = run_dir.parents[2] / "raw" / "data" / lin["data_manifest_sha"]
     reqs = {r.request_id: r for r in load_requests(data_dir)}
@@ -83,12 +89,32 @@ def sample_rows(rows: list[dict[str, Any]], n: int | None, seed: int = 0) -> lis
     return [rows[i] for i in pick]
 
 
+FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
 def _cell(v: Any) -> str:
     if v is None:
         return ""
     if isinstance(v, bool):
         return "TRUE" if v else "FALSE"
+    if isinstance(v, str) and v.startswith(FORMULA_LEAD):
+        return "'" + v                         # shown as text, never evaluated (the JSONL keeps the exact text)
     return str(v)
+
+
+def has_labels(csv_path: Path) -> bool:
+    """True if an existing sheet may hold labeller work: any filled label column, or a file this exporter cannot
+    read back as its own sheet (re-saved as cp949 or with another delimiter, renamed headers). Fails closed."""
+    if not csv_path.exists():
+        return False
+    try:
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            rd = csv.DictReader(f)
+            if not set(LABEL_COLUMNS) <= set(rd.fieldnames or ()):
+                return True
+            return any(any((row.get(c) or "").strip() for c in LABEL_COLUMNS) for row in rd)
+    except (UnicodeDecodeError, csv.Error):
+        return True
 
 
 def csv_text(rows: list[dict[str, Any]]) -> str:
@@ -116,11 +142,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None, help="CSV path (the JSONL goes next to it); default <run-dir>/label_sheet.csv")
     ap.add_argument("--sample", type=int, default=None, help="export a seeded random subset of N requests")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--force", action="store_true", help="overwrite a sheet whose label columns are filled")
     a = ap.parse_args(argv)
-    run_dir = Path(a.run_dir)
+    run_dir = Path(os.path.abspath(a.run_dir))
+    target = Path(a.out) if a.out else run_dir / "label_sheet.csv"
+    if not a.force and has_labels(target):
+        print(f"error: {target} already has labels; not overwriting (use --out for a new file or --force)",
+              file=sys.stderr)
+        return 2
     rows, info = build_rows(run_dir)
     rows = sample_rows(rows, a.sample, a.seed)
-    csv_path, jsonl_path = write_sheet(rows, Path(a.out) if a.out else run_dir / "label_sheet.csv", info["run_id"])
+    csv_path, jsonl_path = write_sheet(rows, target, info["run_id"])
     n_att = sum(1 for r in rows if r["is_attack"])
     print(f"wrote {len(rows)} rows ({n_att} attack, {len(rows) - n_att} benign) -> {csv_path} and {jsonl_path}")
     if info["n_skipped_errors"]:

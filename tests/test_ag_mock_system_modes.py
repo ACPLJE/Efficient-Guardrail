@@ -360,6 +360,7 @@ def test_evaluation_only_never_qualifies_for_latest():
     clean = {"clock": "monotonic", "code_dirty": False}
     assert latest_eligible(clean, "sglang-0.5.21", True, {})
     assert not latest_eligible(clean, "sglang-0.5.21", True, {"evaluation_only": True})
+    assert not latest_eligible(clean, "sglang-0.5.21", True, {}, partial=True)  # --limit / incomplete runs never qualify
 
 
 def test_outcome_row_written_after_finished_is_on_disk(tmp_path, monkeypatch):
@@ -411,3 +412,17 @@ def test_rbv_and_bbg_rejected(tmp_path):
     from ag.config.schema import ConfigError
     with pytest.raises(ConfigError):
         run_overlay(tmp_path, "bad", "BAD", {"release_before_verdict": True, "block_before_generation": True})
+
+
+def test_blocked_units_without_a_verdict_keep_utility_none(tmp_path):
+    """Pending judge: a blocked unit's utility stays None (unlabelled) instead of 0, so the utility denominator is
+    not made of blocked units only; with a real judge blocked units still get 0 (test above)."""
+    from ag.metrics.score import _blocked_utility
+    assert _blocked_utility(None, True) is None and _blocked_utility(True, True) is False
+    assert _blocked_utility(True, False) is True
+    d = run_overlay(tmp_path, "agp", "AGP", {"mock": {"judge": {"false_positive_rate": 0.5}}},
+                    success_judge="pending")["AGP"]
+    outs = rows(d / "outcomes.jsonl")
+    assert any(o["blocked"] for o in outs) and all(o["utility"] is None for o in outs)
+    s = load_json(d / "summary.json")
+    assert s["utility"]["den"] == 0 and s["utility"]["n_unlabelled"] == sum(1 for o in outs if not o["is_attack"])

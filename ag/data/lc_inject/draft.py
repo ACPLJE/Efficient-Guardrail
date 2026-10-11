@@ -41,6 +41,7 @@ TASKS: tuple[dict[str, str], ...] = (
 )
 LENGTH_TOKENS = {**_MOCK_LENGTH_TOKENS, "16k": 16384, "64k": 65536, "128k": 131072}
 POSITIONS = (0.1, 0.5, 0.9)
+FIT_ATTEMPTS = 6      # attempts per pair; a pool whose first paragraph alone overflows drops that doc (<= 5 dropped)
 _WS = re.compile(r"\s+")
 
 
@@ -117,7 +118,12 @@ class _Pool:
         return min(bisect.bisect_left(self.cum, chars), len(self.paras))
 
     def chars(self) -> int:
-        return sum(len(d.text) for d in self.docs)
+        return sum(len(self.docs[int(i)].text) for i in self.order)
+
+
+class _LeadOverflow(ValueError):
+    """The pool's first paragraph alone (with the payload and the template) is longer than the target: only a pool
+    that starts at another doc can fit, so _make_pair drops that doc and retries."""
 
 
 def _narrow(lo: int, f_lo: int | None, hi: int, f_hi: int, measure: Callable[[int], int],
@@ -169,7 +175,7 @@ def _fit_background(pool: _Pool, measure: Callable[[int, int | None], int], n_ta
         if not pool.ensure(k):
             k = len(pool.paras)
         if k <= k_lo:
-            raise ValueError(f"{where}: background pool too small: {len(pool.docs)} docs ({pool.chars()} chars) "
+            raise ValueError(f"{where}: background pool too small: {len(pool.order)} docs ({pool.chars()} chars) "
                              f"render to {f_lo} tokens < {lo_ok:.0f} (target {n_target})")
         f = measure(k, None)
         if f <= hi_ok:
@@ -196,6 +202,11 @@ def _fit_background(pool: _Pool, measure: Callable[[int, int | None], int], n_ta
         return measure(k, cuts[x - 1]) if 1 <= x <= len(cuts) else measure(k + (x > 0), None)
 
     x, f = _narrow(0, f_lo, len(cuts) + 1, f_hi, measure_cut, weight, lo_ok, hi_ok)
+    if (f is None or f < lo_ok) and k == 1:
+        smallest = measure_cut(1)          # paragraph 0 + one word of paragraph 1: the shortest valid background
+        if smallest > hi_ok:
+            raise _LeadOverflow(f"{where}: the first paragraph of doc {pool.docs[int(pool.order[0])].doc_id} "
+                                f"alone renders to about {smallest} tokens > {n_target}")
     if f is None or f < lo_ok:
         raise ValueError(f"{where}: cannot fit {n_target} tokens within tolerance {tolerance}: best {f} "
                          f"(< {lo_ok:.0f}) with {k} paragraphs + {x} words of the next one")
@@ -213,7 +224,8 @@ def _make_pair(*, docs: Sequence[Doc], source: str, split: str, lc: str, idx: in
     ti, attack_type, position, gi = design_cell(idx, attack_types=attack_types, positions=positions)
     task, goal = TASKS[ti], INJECTED_GOALS[gi]
     payload = build_payload(attack_type, goal)
-    pool = _Pool(docs, rng.permutation(len(docs)))
+    order = rng.permutation(len(docs))
+    pool = _Pool(docs, order)
     cache: dict[tuple[int, int | None], int] = {}
 
     def background(k: int, cut: int | None) -> list[str]:
@@ -226,7 +238,17 @@ def _make_pair(*, docs: Sequence[Doc], source: str, split: str, lc: str, idx: in
         return cache[(k, cut)]
 
     rid_a = make_request_id(source, split, lc, idx, True)
-    k, cut, n_tok = _fit_background(pool, measure, n_target, tolerance, rid_a)
+    skipped: list[str] = []
+    for attempt in range(FIT_ATTEMPTS):     # deterministic: attempt j starts the same permutation at doc j
+        try:
+            k, cut, n_tok = _fit_background(pool, measure, n_target, tolerance, rid_a)
+            break
+        except _LeadOverflow:
+            if attempt + 1 == FIT_ATTEMPTS or attempt + 1 >= len(order):
+                raise
+            skipped.append(docs[int(order[attempt])].doc_id)
+            pool = _Pool(docs, order[attempt + 1:])      # measure()/background() read the rebound pool / cache
+            cache = {}
     paras = background(k, cut)
     doc_a, (s, e) = insert_payload(paras, payload, position)
     doc_b = "\n\n".join(paras)
@@ -234,7 +256,8 @@ def _make_pair(*, docs: Sequence[Doc], source: str, split: str, lc: str, idx: in
     assert doc_a[:s - 2] + doc_a[e:] == doc_b
     doc_ids = list(dict.fromkeys(docs[d].doc_id for d in pool.src[:len(paras)]))
     meta_common: dict[str, Any] = {"task_id": task["task_id"], "task_text": task["text"],
-                                   "background_doc_ids": doc_ids, "draft": True}
+                                   "background_doc_ids": doc_ids, "background_skipped_doc_ids": skipped,
+                                   "draft": True}
 
     def req(attack: bool) -> Request:
         rid = make_request_id(source, split, lc, idx, attack)
