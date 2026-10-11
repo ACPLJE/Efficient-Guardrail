@@ -442,14 +442,14 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
     for cls in sorted(by_cls):
         for split in SPLITS:
             pool_all = [it for it in by_cls[cls] if it["split"] == split]
-            # a test_only source (LLMail) is drawn on its own, to the same length histogram, so the in-distribution
-            # windows the gate uses keep the full n_test and their length matching (the held-out set is extra rows)
-            parts = [("", [it for it in pool_all if not it.get("test_only")])]
-            if split == "test" and any(it.get("test_only") for it in pool_all):
-                parts.append(("ho-", [it for it in pool_all if it.get("test_only")]))
-            for tag, pool in parts:
-                if not pool:
-                    continue
+            # group mode: a test_only source (LLMail) is drawn on its own, to the same length histogram, so the
+            # in-distribution windows the gate uses keep the full n_test and their length matching (the held-out set
+            # is extra rows).  Source mode: the held-out sources ARE the gate's test positives, one pool as before.
+            parts = [("", pool_all)]
+            if split == "test" and split_mode == "group" and any(it.get("test_only") for it in pool_all):
+                parts = [("", [it for it in pool_all if not it.get("test_only")]),
+                         ("ho-", [it for it in pool_all if it.get("test_only")])]
+            for tag, pool in parts:                             # an empty pool draws nothing and is a shortfall
                 key = f"{cls}/{split}" + ("/heldout" if tag else "")
                 draws = stratified_draw(pool, hist, n_by_split[split], profile.max_reuse,
                                         random.Random(f"{seed}-{cls}-{split}{tag}"))
@@ -491,6 +491,7 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
     w_sha, b_sha = content_sha(rows), content_sha(big)
     from lgs1.lineage import canonical_hash
     dsha = canonical_hash({"windows": w_sha, "bigneg": b_sha, "recipe": recipe_hash(rec)})[:16]
+    ho_apart = split_mode == "group"                   # test_only rows are drawn and reported apart (see above)
     card = {
         "run": run, "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": round(time.time() - t0, 1),
         "recipe": rec, "recipe_hash": recipe_hash(rec), "smoke": smoke,
@@ -500,11 +501,13 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
         "length_hist_target": {str(b * BIN): round(p, 4) for b, p in sorted(hist.items())},
         "windows": {s: dict(Counter(r["cls"] for r in rows if r["split"] == s)) for s in SPLITS},
         "windows_by_source": {c: dict(Counter(r["source"] for r in rows if r["cls"] == c)) for c in sorted(by_cls)},
+        # the gate side only: in group mode the test_only rows are a separate held-out contrast
         "snippet_tokens": {c: {s: _len_stats([r["n_tok_snip"] for r in rows
-                                              if r["cls"] == c and r["split"] == s and not r.get("test_only")])
+                                              if r["cls"] == c and r["split"] == s and not (ho_apart and r.get("test_only"))])
                                for s in SPLITS} for c in sorted(by_cls)},
         "snippet_tokens_heldout": {c: _len_stats([r["n_tok_snip"] for r in rows if r["cls"] == c and r.get("test_only")])
-                                   for c in sorted(by_cls) if any(r["cls"] == c and r.get("test_only") for r in rows)},
+                                   for c in sorted(by_cls)
+                                   if ho_apart and any(r["cls"] == c and r.get("test_only") for r in rows)},
         "window_tokens": _len_stats([r["n_tok"] for r in rows]),
         "bigneg": dict(Counter(r["cls"] for r in big)), "shortfall": shortfall, "audit": audit(rows),
     }

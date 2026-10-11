@@ -653,6 +653,9 @@ def report_md(s: Dict, card: Dict, results: Dict) -> str:
     L.append("\nSnippet tokens on test (mean / p50): " + "; ".join(
         f"{c} {card['snippet_tokens'][c]['test'].get('mean', 'n/a')} / {card['snippet_tokens'][c]['test'].get('p50', 'n/a')}"
         for c in classes if card['snippet_tokens'].get(c, {}).get('test')))
+    if card.get("snippet_tokens_heldout"):
+        L.append("Held-out (test_only) snippet tokens (mean / p50): " + "; ".join(
+            f"{c} {v.get('mean', 'n/a')} / {v.get('p50', 'n/a')}" for c, v in card["snippet_tokens_heldout"].items()))
     L.append("\nSources per class (windows): " + "; ".join(
         f"{c}: " + ", ".join(f"{s_}={n}" for s_, n in d.items()) for c, d in card["windows_by_source"].items()))
     if card.get("length_warning"):

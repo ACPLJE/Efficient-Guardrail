@@ -61,7 +61,7 @@ def _expand_backbones(spec: str) -> List[str]:
 def _check_tok(tok: str) -> None:
     """--tok must resolve offline on the compute node: a known name, a local directory, or a cached repo id."""
     from lgs2.config import TOKENIZERS
-    if tok in ("whitespace", "ws") or Path(tok).is_dir():
+    if tok in ("whitespace", "ws") or (tok not in TOKENIZERS and Path(tok).is_dir()):   # get_tok: registry first
         return
     repo = TOKENIZERS.get(tok, tok)
     if not _REPO_ID.match(repo):

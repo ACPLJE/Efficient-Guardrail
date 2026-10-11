@@ -88,7 +88,7 @@ probe는 다음과 같다.
 
 **분할.** 조각은 그룹 단위로, 배경은 **원 문서** 단위로 hash 분할한다(train/val/test = 0.6/0.1/0.3). 한 책의 여러 조각은 같은 분할에 들어간다. 같은 그룹 키는 클래스가 달라도 같은 분할로 간다. LLMail-Inject는 어느 모드에서나 test 전용이다. 다른 injection 원천은 위 비율로 나뉘므로, group 모드에서 게이트의 두 곡선은 모두 학습 분포 안의 값이다. `datacard.json`의 `audit`은 조각 id, 그룹, 조각 원문, 배경 조각, 원 문서가 분할을 넘나들지 않는지 확인한다. `--split-mode source`는 LG 공개 test 원천도 test 전용으로 둔다. 이 모드에서는 held-out 원천이 있는 클래스의 나머지 원천이 train/val에만 들어간다. 그래서 source 모드의 injection test 양성은 LLMail-Inject뿐이다.
 
-**test 전용 원천의 추출.** LLMail-Inject 창은 다른 injection 창과 따로 뽑는다. 같은 길이 분포를 따르고 개수도 `n_test`로 같다. id는 `test-inj-ho-…`이다. 그래서 group 모드에서 게이트의 injection 양성은 LLMail이 있든 없든 `n_test`개를 그대로 갖고, 길이 맞춤도 유지된다. `datacard.json`의 `snippet_tokens`는 게이트 쪽 조각만 세고, LLMail 조각은 `snippet_tokens_heldout`에 따로 적는다.
+**test 전용 원천의 추출.** group 모드에서 LLMail-Inject 창은 다른 injection 창과 따로 뽑는다. 같은 길이 분포를 따르고 개수도 `n_test`로 같다. id는 `test-inj-ho-…`이다. 그래서 게이트의 injection 양성은 LLMail이 있든 없든 `n_test`개를 그대로 갖고, 길이 맞춤도 유지된다. `datacard.json`의 `snippet_tokens`는 게이트 쪽 조각만 세고, LLMail 조각은 `snippet_tokens_heldout`에 따로 적는다. source 모드에서는 LLMail이 게이트의 injection test 양성이므로 따로 뽑지 않고 `snippet_tokens`에 그대로 센다. 어느 분할에 조각이 하나도 없는 클래스는 `datacard.shortfall`에 `got: 0`으로 남는다.
 
 **길이 맞춤.** 모든 클래스를 두 양성 클래스의 길이 히스토그램 교집합으로 층화 추출한다. 한 클래스 안에서는 원천별 가중이 같다. 모자란 구간은 가까운 구간의 아직 쓰지 않은 조각부터 채우고, 그다음에만 재사용한다.
 

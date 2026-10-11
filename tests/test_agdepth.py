@@ -526,19 +526,24 @@ def test_stratified_draw_reaches_bins_outside_the_item_range():
     assert len(out) == 50 and all(o["n_tok"] // BIN == 20 for o in out)      # the nearest bin, reused (<= 3 each)
 
 
-def test_heldout_source_is_drawn_on_its_own(agpaths, monkeypatch):
+def _with_heldout_inj(monkeypatch, only=False):
+    """collect_snippets plus a test_only injection source, like LLMail (only=True: the only injection source)."""
     from agdepth import sources as S
-    from agdepth.config import PROFILES
-    from agdepth.windows import build, load_card, read_jsonl_gz
     real = S.collect_snippets
 
-    def with_heldout(*a, **k):                                 # a test_only injection source, like LLMail
+    def wrapped(*a, **k):
         by, rep = real(*a, **k)
         extra = [{"source_id": f"h{i}", "text": f"SMOKEINJ held out message number {i} with a few more words.",
                   "group": f"ho:{i}"} for i in range(40)]
-        by["inj"] += S._dedup_group(extra, "heldout_src", "inj", True, True)
+        by["inj"] = ([] if only else by["inj"]) + S._dedup_group(extra, "heldout_src", "inj", True, True)
         return by, rep
-    monkeypatch.setattr(S, "collect_snippets", with_heldout)
+    monkeypatch.setattr(S, "collect_snippets", wrapped)
+
+
+def test_heldout_source_is_drawn_on_its_own(agpaths, monkeypatch):
+    from agdepth.config import PROFILES
+    from agdepth.windows import build, load_card, read_jsonl_gz
+    _with_heldout_inj(monkeypatch)
     prof = PROFILES["smoke"]
     card = build("h", prof, smoke=True, P=agpaths)
     rows = list(read_jsonl_gz(agpaths.run("h").windows))
@@ -547,6 +552,22 @@ def test_heldout_source_is_drawn_on_its_own(agpaths, monkeypatch):
     assert ho and all(r["split"] == "test" and r["id"].startswith("test-inj-ho-") for r in ho)
     assert len(gate) == prof.n_test                            # the gate positives keep the full n_test
     assert "inj" in card["snippet_tokens_heldout"] and load_card(agpaths.run("h"))["data_manifest_sha"]
+    assert card["snippet_tokens"]["inj"]["test"]["n"] == prof.n_test
+    # source mode: the held-out source IS the gate's injection test set -- one pool, counted in snippet_tokens
+    card = build("hs", prof, split_mode="source", smoke=True, P=agpaths)
+    rows = list(read_jsonl_gz(agpaths.run("hs").windows))
+    inj_test = [r for r in rows if r["cls"] == "inj" and r["split"] == "test"]
+    assert len(inj_test) == prof.n_test and all(r["test_only"] and "-ho-" not in r["id"] for r in inj_test)
+    assert card["snippet_tokens"]["inj"]["test"]["n"] == prof.n_test and not card["snippet_tokens_heldout"]
+
+
+def test_empty_split_pool_is_a_shortfall(agpaths, monkeypatch):
+    from agdepth.config import PROFILES
+    from agdepth.windows import build
+    _with_heldout_inj(monkeypatch, only=True)                  # injection comes only from the test_only source
+    card = build("e", PROFILES["smoke"], smoke=True, P=agpaths)
+    sf = card["shortfall"]
+    assert all(sf[k]["got"] == 0 for k in ("inj/train", "inj/val", "inj/test")), sf     # the gate has no positives
 
 
 def test_bad_pooling_entry_is_rejected_before_any_file(agpaths, tmp_path):
@@ -576,6 +597,10 @@ def test_cli_validation_round3(agpaths, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "qwen3guard_0.6b").mkdir()                     # a same-named directory never shadows a registry key
     assert depthctl._expand_backbones("qwen3guard_0.6b") == ["qwen3guard_0.6b"]
+    (tmp_path / "qwen3").mkdir()                               # get_tok resolves a registry key first: check the cache
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "no_hub"))
+    with pytest.raises(SystemExit):
+        depthctl._check_tok("qwen3")
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty_hub"))
     (tmp_path / "empty_hub" / "models--Qwen--Qwen3Guard-Gen-0.6B" / "blobs").mkdir(parents=True)
     with pytest.raises(SystemExit):                            # a partial download has no tokenizer snapshot
