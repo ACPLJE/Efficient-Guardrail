@@ -31,7 +31,7 @@ def fetch_urls(d: Download, dst: Path) -> Dict:
     dst.mkdir(parents=True, exist_ok=True)
     h = hashlib.sha256()
     for name, data in blobs:
-        tmp = dst / f".{name}.tmp"
+        tmp = dst / f".{name}.{os.getpid()}.tmp"
         tmp.write_bytes(data)
         os.replace(tmp, dst / name)
         h.update(data)

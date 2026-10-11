@@ -57,6 +57,20 @@ def _expand_backbones(spec: str) -> List[str]:
     return [_abs_if_local(b) for b in dict.fromkeys(out)]
 
 
+def _check_tok(tok: str) -> None:
+    """--tok must resolve offline on the compute node: a known name, a local directory, or a cached repo id."""
+    from lgs2.config import TOKENIZERS
+    if tok in ("whitespace", "ws") or Path(tok).is_dir():
+        return
+    repo = TOKENIZERS.get(tok, tok)
+    if not _REPO_ID.match(repo):
+        raise SystemExit(f"[depthctl] --tok {tok!r}: use {sorted(TOKENIZERS)}, a local directory or an org/name repo id")
+    hub = Path(os.environ.get("HF_HUB_CACHE") or (AGPaths.load().hf_home / "hub"))
+    if not (hub / f"models--{repo.replace('/', '--')}").exists():
+        raise SystemExit(f"[depthctl] --tok {tok!r}: {repo} is not in the HF cache {hub} (jobs run offline); "
+                         f"download it on the login node first")
+
+
 def _validate(a) -> None:
     for name, allowed in (("framings", FRAMINGS), ("poolings", POOLINGS)):
         if hasattr(a, name):
@@ -65,11 +79,20 @@ def _validate(a) -> None:
             if bad or not vals:
                 raise SystemExit(f"[depthctl] --{name} {getattr(a, name)!r}: allowed {list(allowed)}")
     if getattr(a, "backbone", None):
-        a.backbone = _expand_backbones(a.backbone)[0]
+        bbs = _expand_backbones(a.backbone)
+        if len(bbs) != 1:
+            raise SystemExit(f"[depthctl] --backbone takes one backbone, got {a.backbone!r} -> {bbs}; "
+                             f"use `run --backbones {a.backbone}` for several")
+        a.backbone = bbs[0]
     if getattr(a, "backbones", None):
         a.backbones = ",".join(_expand_backbones(a.backbones))
+    if getattr(a, "dtype", None):
+        from agdepth.extract import DTYPES
+        if a.dtype not in DTYPES:
+            raise SystemExit(f"[depthctl] --dtype {a.dtype!r}: allowed {sorted(DTYPES)}")
     if getattr(a, "tok", None):
         a.tok = _abs_if_local(a.tok)
+        _check_tok(a.tok)
     if hasattr(a, "profile"):
         from agdepth.windows import profile_from_args
         profile_from_args(a)                                  # raises on an inconsistent override
@@ -169,17 +192,14 @@ def _analyze_args(a) -> List[str]:
 # ------------------------------------------------------------------------------------------------
 # the backbone run: extract -> fit -> score (one process, the model is loaded once), with lineage
 # ------------------------------------------------------------------------------------------------
-def run_pipeline(P: AGPaths, run: str, bb_key: str, framings: Sequence[str], poolings: Sequence[str],
-                 device: Optional[str] = None, dtype: Optional[str] = None, skip_score: bool = False,
-                 drop_feats: bool = False, fresh: bool = False, budget: Optional[int] = None) -> None:
-    from agdepth import extract, fit, score
+def open_bb_run(P: AGPaths, run: str, bb_key: str, dtype_name: str, model_sha: str, fresh: bool = False):
+    """Start (or resume) the lineage of one backbone run: extract, fit and score of that backbone share it.  The run id
+    is kept in probes/<bb>/run_id.txt; a resume under different resume keys (code, env, data, model, dtype) exits 2."""
     from agdepth import lineage as LN
     from agdepth.analyze import exp_of_card
-    from agdepth.fit import probes_current
     from agdepth.windows import load_card
     R = P.run(run)
     card = load_card(R)
-    dsha = card["data_manifest_sha"]
     bb = backbone(bb_key)
     run_dir = R.bb_run(bb.key)
     if fresh:
@@ -188,17 +208,50 @@ def run_pipeline(P: AGPaths, run: str, bb_key: str, framings: Sequence[str], poo
     prof = card["recipe"]["profile"]
     seed = int(card["recipe"].get("seed", 0))
     exp_id = exp_of_card(card)
-    M = extract.load(bb.repo, device, dtype)
     # framings/poolings are outputs of one backbone run, not part of its identity (adding one resumes the same run)
-    cfg = {"data_manifest_sha": dsha, "backbone": bb.repo, "chat": bb.chat, "dtype": M["dtype"],
+    cfg = {"data_manifest_sha": card["data_manifest_sha"], "backbone": bb.repo, "chat": bb.chat, "dtype": dtype_name,
            "max_len": prof["max_len"], "lambdas": list(LAMBDAS), "seeds": list(prof["seeds"]),
            "train_subsample": TRAIN_SUBSAMPLE}
     chash = LN.config_hash(cfg)
     run_id, _ = LN.stable_run_id(run_dir, lambda: LN.make_run_id(exp_id, "probe", bb.key, f"depthwin-{prof['window']}",
                                                                  chash, seed))
     lin = LN.start(run_dir, run_id, exp_id, chash, seed=seed, producer="mock" if card.get("smoke") else "reference",
-                   model_sha={"backbone": LN.model_sha_of(bb.repo, M["sha"])}, data_manifest_sha=dsha,
-                   parents=[card.get("run_id", "")] if card.get("run_id") else [])
+                   model_sha={"backbone": model_sha}, data_manifest_sha=card["data_manifest_sha"],
+                   parents=[card["run_id"]] if card.get("run_id") else [])
+    return lin, run_dir, card
+
+
+def _fit_identity(P: AGPaths, run: str, bb_key: str) -> Tuple[str, str]:
+    """(dtype, model_sha) of an existing backbone run, for a standalone fit (no model is loaded)."""
+    R = P.run(run)
+    bb = backbone(bb_key)
+    lp = R.bb_run(bb.key) / "lineage.json"
+    for fr in FRAMINGS:
+        mp = R.feats(bb.key, fr) / "meta.json"
+        if mp.exists():
+            meta = json.loads(mp.read_text())
+            sha = (json.loads(lp.read_text()).get("model_sha") or {}).get("backbone") if lp.exists() else None
+            from agdepth.lineage import model_sha_of
+            return meta["dtype_model"], sha or model_sha_of(bb.repo, meta.get("model_sha", ""))
+    raise SystemExit(f"[depthctl] no features for {bb.key} in run {run}: run extract (or pipeline) first")
+
+
+def run_pipeline(P: AGPaths, run: str, bb_key: str, framings: Sequence[str], poolings: Sequence[str],
+                 device: Optional[str] = None, dtype: Optional[str] = None, skip_score: bool = False,
+                 drop_feats: bool = False, fresh: bool = False, budget: Optional[int] = None) -> None:
+    from agdepth import extract, fit, score
+    from agdepth import lineage as LN
+    from agdepth.fit import probes_current
+    bb = backbone(bb_key)
+    if fresh:
+        R0 = P.run(run)
+        shutil.rmtree(R0.bb_run(bb.key), ignore_errors=True)
+        shutil.rmtree(R0.root / "feats" / bb.key, ignore_errors=True)
+    M = extract.load(bb.repo, device, dtype)
+    lin, run_dir, card = open_bb_run(P, run, bb_key, M["dtype"], LN.model_sha_of(bb.repo, M["sha"]))
+    R = P.run(run)
+    dsha = card["data_manifest_sha"]
+    prof = card["recipe"]["profile"]
     for fr in framings:
         need_fit = not all(probes_current(R, bb.key, fr, p, dsha) for p in poolings)
         if need_fit:
@@ -212,7 +265,7 @@ def run_pipeline(P: AGPaths, run: str, bb_key: str, framings: Sequence[str], poo
         if drop_feats:
             extract.drop_feats(run, bb.key if bb.key in BACKBONES else bb.repo, [fr], poolings, P=P)
     fit.fit_lex(run, prof["seeds"], LAMBDAS, device, P)
-    steps = {"framings": sorted(set(framings)), "poolings": sorted(set(poolings)), "run_id": run_id}
+    steps = {"framings": sorted(set(framings)), "poolings": sorted(set(poolings)), "run_id": lin.run_id}
     (run_dir / "steps.json").write_text(json.dumps(steps, indent=2))
     LN.finish(run_dir, lin)
 
@@ -251,13 +304,22 @@ def _single(step: str):
             p = _render(P, a.run, f"agd-{step}-{bb.key}-{a.run}", [step] + _bb_args(a, a.backbone), "pipeline")
             return _dispatch([(step, p, [])], a.submit)
         from agdepth import extract, fit, score
+        from agdepth import lineage as LN
         fr, po = a.framings.split(","), a.poolings.split(",")
-        if step == "extract":
-            extract.extract(a.run, a.backbone, fr, po, device=a.device, dtype=a.dtype, P=P)
-        elif step == "fit":
+        if a.fresh:
+            raise SystemExit("[depthctl] --fresh starts a whole backbone run: use `pipeline --fresh`")
+        if step == "fit":                                     # same lineage as the pipeline run of this backbone
+            dt, sha = _fit_identity(P, a.run, a.backbone)
+            lin, run_dir, _ = open_bb_run(P, a.run, a.backbone, dt, sha)
             fit.fit(a.run, a.backbone, fr, po, device=a.device, P=P)
         else:
-            score.score(a.run, a.backbone, fr, po, a.device, a.dtype, P=P)
+            M = extract.load(bb.repo, a.device, a.dtype)
+            lin, run_dir, _ = open_bb_run(P, a.run, a.backbone, M["dtype"], LN.model_sha_of(bb.repo, M["sha"]))
+            if step == "extract":
+                extract.extract(a.run, a.backbone, fr, po, device=a.device, dtype=a.dtype, P=P, M=M)
+            else:
+                score.score(a.run, a.backbone, fr, po, a.device, a.dtype, P=P, M=M)
+        LN.finish(run_dir, lin)
     return cmd
 
 

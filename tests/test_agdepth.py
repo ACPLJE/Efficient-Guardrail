@@ -283,13 +283,20 @@ def test_stratified_draw_is_not_biased_by_file_order():
     assert 0.35 * 30000 < mean_pos < 0.65 * 30000, mean_pos          # log-space keys: no underflow to file order
 
 
-def test_stratified_draw_spends_unique_snippets_before_reuse():
+def test_stratified_draw_fills_short_bins_from_near_bins():
     import random
-    from agdepth.windows import stratified_draw
-    items = [{"source": "s", "n_tok": 8 * b + 1, "sid": f"{b}-{i}"} for b in range(1, 7) for i in range(400)]
-    items += [{"source": "s", "n_tok": 8 * b + 1, "sid": f"{b}-{i}"} for b in range(7, 14) for i in range(10)]
-    out = stratified_draw(items, {b: 1 / 13 for b in range(1, 14)}, 4000, 3, random.Random(0))
-    assert len(out) == 4000 and len({o["sid"] for o in out}) == len(items)   # every distinct snippet used first
+    from agdepth.windows import BIN, stratified_draw
+    # target: short snippets (bins 1-6); the class has few short and many long ones (reviewer scenario)
+    items = [{"source": "s", "n_tok": BIN * b + 1, "sid": f"{b}-{i}"} for b in range(1, 7) for i in range(30)]
+    items += [{"source": "s", "n_tok": BIN * b + 1, "sid": f"{b}-{i}"} for b in range(7, 14) for i in range(300)]
+    out = stratified_draw(items, {b: 1 / 6 for b in range(1, 7)}, 1500, 3, random.Random(0))
+    near = sum(o["n_tok"] // BIN <= 7 for o in out) / len(out)
+    assert len(out) == 1500 and near >= 0.36, near          # in-bin reuse before far-away long snippets
+    # unused distinct snippets one bin away are still taken before any reuse
+    items2 = [{"source": "s", "n_tok": BIN * 3 + 1, "sid": f"a{i}"} for i in range(10)]
+    items2 += [{"source": "s", "n_tok": BIN * 4 + 1, "sid": f"b{i}"} for i in range(100)]
+    out2 = stratified_draw(items2, {3: 0.5, 4: 0.5}, 100, 3, random.Random(0))
+    assert len({o["sid"] for o in out2}) == 100
 
 
 def test_half_variants_keep_only_valid_labels():
@@ -304,9 +311,29 @@ def test_llmail_is_test_only_in_every_split_mode():
     from agdepth.windows import assign_splits
     for mode in ("group", "source"):
         by = {"inj": [{"group": f"ll{i}", "holdout": True, "test_only": True, "split": None} for i in range(30)]
-              + [{"group": f"b{i}", "holdout": False, "test_only": False, "split": None} for i in range(30)]}
+              + [{"group": f"b{i}", "holdout": False, "test_only": False, "split": None} for i in range(300)]}
         assign_splits(by, mode)
         assert all(it["split"] == "test" for it in by["inj"] if it["test_only"])
+        other = [it["split"] for it in by["inj"] if not it["test_only"]]
+        if mode == "group":                    # the other injection sources keep their own test split
+            assert other.count("test") > 50 and other.count("train") > 100, other.count("test")
+
+
+def test_heldout_positives_get_their_own_contrast():
+    from agdepth.analyze import build_contrasts
+    cls = np.array(["inj"] * 6 + ["instr"] * 4 + ["plain"] * 4 + ["harm"] * 3 + ["harm_hard"] * 3 + ["notinject"] * 2)
+    ho = np.zeros(len(cls), bool)
+    ho[:2] = True                                              # two LLMail windows
+    sc = np.random.default_rng(0).normal(size=(2, 1, len(cls), 3))
+    C = build_contrasts(sc, ["harm", "inj"], cls, np.arange(len(cls)), te_heldout=ho)
+    assert C["inj/instr"].Sp.shape[1] == 4 and C["inj@heldout/instr"].Sp.shape[1] == 2
+    assert C["harm/all"].Sp.shape[1] == 3 and "harm@heldout/all" not in C
+
+
+def test_fpr_key_is_exact():
+    from agdepth.analyze import fpr_key
+    assert [fpr_key(t) for t in (1e-2, 1e-3, 2e-4, 5e-5)] == ["1e-2", "1e-3", "2e-4", "5e-5"]
+    assert fpr_key(1.6e-4) == "1.6e-4" and fpr_key(0.015) == "1.5e-2"
 
 
 def test_registry_files_ignore_failed_download(agpaths):
@@ -404,9 +431,11 @@ def test_fresh_extract_never_inherits_progress(agpaths, tmp_path, monkeypatch):
     assert meta["complete"] and np.abs(np.asarray(mm[1])).sum(1).min() > 0     # every window really extracted
 
 
-def test_sbatch_scripts_use_the_ag_environment(agpaths, monkeypatch):
+def test_sbatch_scripts_use_the_ag_environment(agpaths, tmp_path, monkeypatch):
     import depthctl
     monkeypatch.setenv("AGDEPTH_OUT", str(agpaths.root))
+    (tmp_path / "hub" / "models--Qwen--Qwen3Guard-Gen-0.6B").mkdir(parents=True)     # the reference tokenizer is cached
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(depthctl.shutil, "which", lambda name: None)  # no sbatch here: render only
     assert depthctl.main(["run", "--run", "s", "--backbones", "e03", "--dtype", "fp16", "--sbatch"]) == 0
     scripts = sorted((agpaths.root / "s" / "slurm").glob("*.sbatch"))
@@ -420,3 +449,60 @@ def test_sbatch_scripts_use_the_ag_environment(agpaths, monkeypatch):
         depthctl.main(["run", "--run", "s", "--backbones", "qwen3guard_06b", "--sbatch"])
     with pytest.raises(SystemExit):
         depthctl.main(["run", "--run", "s", "--poolings", "mean,max", "--sbatch"])
+
+
+def test_cli_rejects_ambiguous_backbone_and_bad_dtype(agpaths, monkeypatch):
+    import depthctl
+    monkeypatch.setenv("AGDEPTH_OUT", str(agpaths.root))
+    monkeypatch.setattr(depthctl.shutil, "which", lambda name: None)
+    for argv in (["pipeline", "--run", "x", "--backbone", "e03", "--sbatch"],
+                 ["pipeline", "--run", "x", "--backbone", "qwen3guard_0.6b,llama31_8b", "--sbatch"],
+                 ["run", "--run", "x", "--backbones", "e03", "--dtype", "float8", "--sbatch"],
+                 ["run", "--run", "x", "--backbones", "e03", "--tok", "qwen-3", "--sbatch"]):
+        with pytest.raises(SystemExit):
+            depthctl.main(argv)
+
+
+def test_hub_fallback_is_skipped_after_a_failed_download(agpaths, tmp_path, monkeypatch):
+    from agdepth.config import SNIP_SOURCE_BY_NAME
+    from agdepth.sources import registry_files
+    hub = tmp_path / "hub"
+    snap = hub / "datasets--deepset--prompt-injections" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "part.jsonl").write_text('{"text": "x", "label": 1}\n')
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    src = SNIP_SOURCE_BY_NAME["deepset_pi"]
+    assert registry_files(src, agpaths)                       # no download record: the cached copy is used
+    d = agpaths.sources / "deepset_pi"
+    d.mkdir(parents=True)
+    (d / "revision.json").write_text(json.dumps({"status": "failed"}))
+    assert registry_files(src, agpaths) == []                 # a failed download never falls back to a partial copy
+
+
+def test_interrupted_rebuild_leaves_no_stale_card(agpaths, monkeypatch):
+    from agdepth import lineage as LN
+    from agdepth.config import PROFILES
+    from agdepth.windows import build, load_card
+    build("i", PROFILES["smoke"], smoke=True, P=agpaths)
+    assert load_card(agpaths.run("i"))["data_manifest_sha"]
+
+    def boom(*a, **k):
+        raise RuntimeError("killed")
+    monkeypatch.setattr(LN, "start", boom)
+    with pytest.raises(RuntimeError):
+        build("i", PROFILES["smoke"], smoke=True, P=agpaths, seed=5)
+    with pytest.raises(SystemExit):                            # consumers refuse instead of using the old hash
+        load_card(agpaths.run("i"))
+
+
+def test_standalone_fit_shares_the_backbone_lineage(tmp_path, monkeypatch):
+    import depthctl
+    monkeypatch.setenv("LG_ENV_FILE_NO_OVERRIDE", "1")
+    depthctl.cmd_smoke(type("A", (), {"dir": str(tmp_path), "n_boot": 2, "primary_fpr": None})())
+    run_dir = tmp_path / "out" / "smoke" / "probes" / "tiny-model"
+    before = json.loads((run_dir / "lineage.json").read_text())
+    monkeypatch.setenv("AGDEPTH_OUT", str(tmp_path / "out"))
+    assert depthctl.main(["fit", "--run", "smoke", "--backbone", str(tmp_path / "tiny-model"), "--framings", "raw",
+                          "--poolings", "mean", "--device", "cpu"]) == 0
+    after = json.loads((run_dir / "lineage.json").read_text())
+    assert after["run_id"] == before["run_id"] and after["finished_unix_ns"] >= before["finished_unix_ns"]

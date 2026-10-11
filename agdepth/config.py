@@ -47,10 +47,11 @@ class AGPaths:
         load_env_file()
         p1 = S1Paths.load()
         if root is None:
+            ag_out = env("AG_OUT") or ag_env_value("AG_OUT")
             if env("AGDEPTH_OUT"):
                 root = Path(env("AGDEPTH_OUT"))
-            elif env("AG_OUT"):
-                root = Path(env("AG_OUT")) / "poc" / "agdepth"      # beside, never inside, the SPEC 7.1 raw/ tree
+            elif ag_out:
+                root = Path(ag_out) / "poc" / "agdepth"             # beside, never inside, the SPEC 7.1 raw/ tree
             else:
                 root = p1.out / "agdepth"
         data_v2 = Path(env("LG_DATA_V2", str(p1.sources.parent)))
@@ -59,6 +60,22 @@ class AGPaths:
 
     def run(self, name: str) -> "RunPaths":
         return RunPaths(self.root / name)
+
+
+def ag_env_value(key: str) -> Optional[str]:
+    """A value from env/ag.env (or $AG_ENV_FILE) as slurm/ag_common.sh would set it; understands `${KEY:-default}`."""
+    import re
+    f = Path(os.environ.get("AG_ENV_FILE") or Path(__file__).resolve().parent.parent / "env" / "ag.env")
+    if not f.exists():
+        return None
+    for line in f.read_text(encoding="utf-8").splitlines():
+        m = re.match(rf"^\s*(?:export\s+)?{key}=(.*)$", line.split(" #", 1)[0].strip())
+        if m:
+            v = m.group(1).strip().strip('"').strip("'")
+            d = re.fullmatch(r"\$\{" + key + r":-(.*)\}", v)
+            v = d.group(1) if d else v
+            return os.path.expandvars(os.path.expanduser(v)) or None
+    return None
 
 
 @dataclass
@@ -198,6 +215,7 @@ GATE = {"shallow": ("harm", "all"), "deep": ("inj", "instr"), "min_ratio": 1.5}
 # secondary comparisons reported next to the gate (both sides with hard negatives / both with plain negatives)
 COMPARISONS = [
     ("gate", ("harm", "all"), ("inj", "instr")),
+    ("gate_plan", ("harm", "plain"), ("inj", "instr")),       # the plan's negatives on the harm side (D-041 (e))
     ("hard_vs_hard", ("harm", "hard"), ("inj", "hard")),
     ("plain_vs_plain", ("harm", "plain"), ("inj", "plain")),
 ]
@@ -237,7 +255,7 @@ SEED = 20261011
 EXP_OF_PROFILE = {"smoke": "E0.3", "quick": "E0.3", "full": "E1.1"}
 FRAMINGS = ("raw", "task")
 POOLINGS = ("mean", "last", "span")
-DEFAULT_POOLINGS = ("mean", "last")
+DEFAULT_POOLINGS = ("mean", "last", "span")              # span: the dilution check of the reading guide
 LAMBDAS = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)                       # L2 grid for the probes (picked on val AUROC)
 TRAIN_SUBSAMPLE = 0.85                                        # every seed trains on this share of train groups
 

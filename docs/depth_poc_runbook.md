@@ -2,7 +2,7 @@
 
 Oct 11, 2026 · 계획서 `asymmetric-guard-osdi27-plan-2026-10-10.md` §2.2의 관찰 1(깊이), §8.2의 E0.3, §8.3의 E1.1을 돌리는 코드다. 코드는 `agdepth/` 패키지, 진입점은 `depthctl.py`다.
 
-> **지위.** 이 코드는 구축 계획 S2b의 `ag/probes/depth_probe.py`가 아니라 그 전에 쓴 PoC다. 결과는 SPEC 7.1 트리(`$AG_OUT/raw/`) 밖에 쓰고, plots/와 latest.txt에 섞이지 않는다. 계획서·SPEC과 다른 점과 결정이 필요한 항목은 `docs/DECISIONS.md` D-041에 있다. 특히 (a) 코드 위치, (b) injection 양성 출처, (e) 게이트의 유해 쪽, (h) G0에 쓰는 framing·pooling은 강지의의 결정이 필요하다.
+> **지위.** 이 코드는 구축 계획 S2b의 `ag/probes/depth_probe.py`가 아니라 그 전에 쓴 PoC다. 결과는 SPEC 7.1 트리(`$AG_OUT/raw/`) 밖에 쓰고, plots/와 latest.txt에 섞이지 않는다. 계획서·SPEC과 다른 점과 결정이 필요한 항목은 `docs/DECISIONS.md` D-041에 있다. 특히 (a) 코드 위치, (b) injection 양성 출처, (e) G0에 쓰는 게이트(`gate` 또는 `gate_plan`), (h) G0에 쓰는 framing·pooling은 강지의의 결정이 필요하다.
 
 값의 출처 표기는 CLAUDE.md 3.5를 따른다. \[측정\] 우리가 잰 값, \[계산\] 산술, \[문헌\] 문서·소스에서 확인한 값, \[추정\] 어림값, \[해석\] 판단.
 
@@ -10,7 +10,16 @@ Oct 11, 2026 · 계획서 `asymmetric-guard-osdi27-plan-2026-10-10.md` §2.2의 
 
 **주장.** 같은 backbone, 같은 선형 probe로 보면 유해 콘텐츠 창은 얕은 층에서 정상 창과 갈린다. 반면 injection 창은 지시문이 많은 정상 창과 깊은 층에서야 갈린다.
 
-**게이트(계획서 E0.3, 제안값).** ℓ95(injection 대 지시문이 많은 음성) ≥ 1.5 × ℓ95(유해 대 모든 정상).
+**게이트(계획서 E0.3, 제안값).** ℓ95(injection 대 지시문이 많은 음성) ≥ 1.5 × ℓ95(유해).
+
+보고서는 두 가지로 판정한다.
+
+| 이름 | 유해 쪽 음성 | 비고 |
+| --- | --- | --- |
+| `gate_plan` | 일반 정상(plain) | 계획서 그대로 |
+| `gate` | plain + harm_hard | PoC 제안 |
+
+G0에 무엇을 쓸지는 D-041 (e)에서 정한다.
 
 - 주 지표는 창 FPR 2×10⁻⁴의 TPR이고, 고정이다(계획서 §8.2, §9.1, SPEC 6.5).
 - ℓ95는 그 TPR이 층별 최고값의 95 %에 처음 닿는 층이다.
@@ -42,7 +51,7 @@ Oct 11, 2026 · 계획서 `asymmetric-guard-osdi27-plan-2026-10-10.md` §2.2의 
 | --- | --- | --- |
 | `harm` | 유해 요청 | LG v2 needle pool(`needles/pool.jsonl.gz`, label harmful). 없으면 S2 loader로 원천 파일을 메모리에서 읽는다 |
 | `harm_hard` | 정상 요청. OR-Bench, XSTest처럼 과잉 거부를 부르는 문장 포함 | LG v2 needle pool, label benign (계획서에 없는 클래스, D-041 (e)) |
-| `inj` | prompt injection payload | 공개 데이터: BIPIA 공격 지시문(text·code), deepset/prompt-injections(label 1), LLMail-Inject(**항상 test 전용**), Gandalf (D-041 (b)) |
+| `inj` | prompt injection payload | 공개 데이터: BIPIA 공격 지시문(text·code), deepset/prompt-injections(label 1), LLMail-Inject, Gandalf (D-041 (b)). LLMail-Inject는 **항상 test 전용**이고 게이트에서 빼고 `inj@heldout`으로 따로 보고한다(D-041 (c)) |
 | `instr` | 사람에게 하는 지시문이 많은 정상 텍스트 | 템플릿 40종 + 배경 문서에서 명령문이 2개 이상이고 40 % 이상인 문단 |
 | `notinject` | trigger 단어가 든 정상 prompt | NotInject (339개 \[문헌: GitHub 파일\]) |
 | `plain` | 지시문이 없는 정상 문단 | 배경 문서의 문단 |
@@ -71,13 +80,13 @@ probe는 다음과 같다.
 | `task` framing | 정상 과업 16종 중 하나(창 id의 hash로 정한다) 뒤에 창을 문서로 넣은 채팅 입력이다. instruct 타깃은 자기 chat template을 쓴다. guard(Qwen3Guard, Llama Guard)는 template이 moderation prompt이므로 같은 계열의 중립 user 턴(ChatML, Llama 3 형식)을 쓴다 |
 | `mean` pooling | 창 토큰 평균. raw에서는 attention sink인 첫 토큰을 뺀다 |
 | `last` pooling | raw는 창의 마지막 토큰, task는 prompt의 마지막 토큰이다 |
-| `span` pooling | 끼운 조각 토큰의 평균. 진단용이다 |
+| `span` pooling | 끼운 조각 토큰의 평균. 진단용이고 기본으로 같이 뽑는다 |
 
 문서 안의 special token과 added token 문자열(`<|im_start|>`, Qwen3의 `<think>`, `<tool_call>` 등)은 평문으로 토큰화한다. backbone 계열에 따라 제어 토큰이 되는 일을 막기 위해서다.
 
 ### 2.4 누수 방지, 재현성, 통계
 
-**분할.** 조각은 그룹 단위로, 배경은 **원 문서** 단위로 hash 분할한다(train/val/test = 0.6/0.1/0.3). 한 책의 여러 조각은 같은 분할에 들어간다. 같은 그룹 키는 클래스가 달라도 같은 분할로 간다. `datacard.json`의 `audit`은 조각 id, 그룹, 조각 원문, 배경 조각, 원 문서가 분할을 넘나들지 않는지 확인한다. `--split-mode source`는 LG 공개 test 원천도 test 전용으로 둔다.
+**분할.** 조각은 그룹 단위로, 배경은 **원 문서** 단위로 hash 분할한다(train/val/test = 0.6/0.1/0.3). 한 책의 여러 조각은 같은 분할에 들어간다. 같은 그룹 키는 클래스가 달라도 같은 분할로 간다. LLMail-Inject는 어느 모드에서나 test 전용이다. 다른 injection 원천은 위 비율로 나뉘므로, group 모드에서 게이트의 두 곡선은 모두 학습 분포 안의 값이다. `datacard.json`의 `audit`은 조각 id, 그룹, 조각 원문, 배경 조각, 원 문서가 분할을 넘나들지 않는지 확인한다. `--split-mode source`는 LG 공개 test 원천도 test 전용으로 둔다.
 
 **길이 맞춤.** 모든 클래스를 두 양성 클래스의 길이 히스토그램 교집합으로 층화 추출한다. 한 클래스 안에서는 원천별 가중이 같다. 모자란 구간은 가까운 구간의 아직 쓰지 않은 조각부터 채우고, 그다음에만 재사용한다.
 
@@ -89,7 +98,7 @@ probe는 다음과 같다.
 - 특징, probe, 점수, lexical baseline, big pool 점수가 모두 이 값을 기록한다.
 - 데이터를 다시 만들면 예전 특징은 거부하거나 다시 계산하고, 섞이지 않는다.
 
-**lineage(CLAUDE.md 3.3).** build(`data/`), backbone 실행(`probes/<bb>/`), analyze(`report/`)가 각자 `lineage.json`을 `ag/harness/lineage.py`로 쓴다. 이어 돌리기는 같은 run_id에서만 하고, resume 키(코드, 환경, 설정, 모델, 데이터, GPU)가 다르면 exit 2로 끝난다. 새로 시작하려면 `--fresh`를 주거나 다른 `--run` 이름을 쓴다.
+**lineage(CLAUDE.md 3.3).** build(`data/`), backbone 실행(`probes/<bb>/`), analyze(`report/`)가 각자 `lineage.json`을 `ag/harness/lineage.py`로 쓴다. `pipeline`과 따로 돌린 `extract`, `fit`, `score`는 같은 backbone 실행의 lineage를 공유한다. 이어 돌리기는 같은 run_id에서만 하고, resume 키(코드, 환경, 설정, 모델, 데이터, GPU)가 다르면 exit 2로 끝난다. 새로 시작하려면 `--fresh`를 주거나 다른 `--run` 이름을 쓴다.
 
 **지표.** 층마다 다음을 잰다.
 
@@ -115,8 +124,8 @@ cd /home/212aig08/guardrail/main/Efficient-Guardrail
 source /home/212aig08/ag_venv/ag311/bin/activate        # D-001
 pip install -r requirements.txt matplotlib torch transformers   # 그림이 필요 없으면 matplotlib 생략
 cp env/ag.env.example env/ag.env                          # sbatch가 slurm/ag_common.sh로 읽는다
-python depthctl.py smoke                                  # 작은 무작위 모델로 전 과정 점검 (CPU)
-python -m pytest -q tests/test_agdepth.py                 # 26개
+python depthctl.py smoke                                  # 작은 무작위 모델로 전 과정 점검 (CPU, 이 컨테이너에서 26초 [측정])
+python -m pytest -q tests/test_agdepth.py                 # 32개
 ```
 
 smoke는 배관만 확인한다. 보고서 맨 위에도 그렇게 적힌다. 2×10⁻⁴는 smoke 규모로는 잴 수 없어서 판정이 INCONCLUSIVE로 나오는 것이 정상이다.
@@ -125,17 +134,18 @@ smoke는 배관만 확인한다. 보고서 맨 위에도 그렇게 적힌다. 2�
 
 | 명령 | 결과 |
 | --- | --- |
-| `pytest tests/test_agdepth.py` | 26 passed, 약 72초 |
-| `python -m pytest tests -x -q` | 325 passed, 2 skipped |
-| `pytest $(cat tests/manifests/cpu.txt)` | 325 passed, 1 skipped |
+| `pytest tests/test_agdepth.py` | 32 passed, 약 100초 |
+| `python -m pytest tests -x -q` | 331 passed, 2 skipped |
+| `pytest $(cat tests/manifests/cpu.txt)` | 331 passed, 1 skipped |
 | `python tools/check_test_classification.py` | rc 0 |
 
 ### 3.1 다운로드 (로그인 노드만)
 
 ```bash
-nohup python depthctl.py download > dl.log 2>&1 &     # BIPIA, NotInject(GitHub raw), deepset, LLMail-Inject, Gandalf, Llama-3.1-8B-Instruct, Qwen3-4B-Instruct-2507
-python depthctl.py download --with-s1                 # LG v2 needle pool / haystack가 아직 없으면 S1 원천도
-python depthctl.py doctor                             # 무엇이 있고, job이 어디에 쓰는지
+nohup python depthctl.py download > dl.log 2>&1 &            # BIPIA, NotInject(GitHub raw), deepset, LLMail-Inject, Gandalf, Llama-3.1-8B-Instruct, Qwen3-4B-Instruct-2507
+# LG v2 needle pool / haystack가 아직 없으면 위 대신 S1 원천까지 한 번에 받는다(둘을 동시에 돌리지 않는다):
+#   nohup python depthctl.py download --with-s1 > dl.log 2>&1 &
+python depthctl.py doctor                                    # 다운로드가 끝난 뒤: 무엇이 있고, job이 어디에 쓰는지
 ```
 
 - xet은 끈다(`HF_HUB_DISABLE_XET=1`). URL 파일은 전부 받았을 때만 저장한다.
@@ -150,7 +160,8 @@ python depthctl.py run --run e03 --profile quick --backbones e03 --sbatch --subm
 ```
 
 - 스크립트는 `agctl`과 같은 머리말을 쓴다(`-p RTX6000ADA --qos=normal --gres=gpu:1`, `slurm/ag_common.sh`).
-- job은 `$AGDEPTH_OUT`(기본 `$AG_OUT/poc/agdepth`)에 쓴다. 결과는 `<root>/e03/report/report.md`에 나온다.
+- 출력 루트는 `$AGDEPTH_OUT`, 없으면 `$AG_OUT`(셸 또는 `env/ag.env`)`/poc/agdepth`, 그것도 없으면 `$LG_OUT/agdepth`다. 제출할 때 정한 루트를 job에 `AGDEPTH_OUT`으로 넘긴다. 결과는 `<root>/e03/report/report.md`에 나온다.
+- pooling 기본값은 mean, last, span이고 framing 기본값은 raw, task다. `--backbone`은 backbone 하나만 받는다. 여러 개는 `run --backbones`로 준다.
 - 단계별 명령(`build`, `pipeline`, `extract`, `fit`, `score`, `analyze`)도 같은 `--sbatch [--submit]`를 받는다.
 - extract와 score는 shard 단위로 이어서 돈다.
 
@@ -166,12 +177,12 @@ python depthctl.py run --run e11 --profile full --backbones e11 --drop-feats --s
 
 | | quick (E0.3) | full (E1.1) |
 | --- | --- | --- |
-| 학습·평가 창 | 클래스 6 × 2,400 ≈ 1.4만 \[계산\] | 클래스 6 × 6,000 = 3.6만 \[계산\] |
+| 학습·평가 창 | 5 × 2,400 + NotInject 최대 1,017 ≈ 1.3만 \[계산\] | 5 × 6,000 + NotInject 최대 1,017 ≈ 3.1만 \[계산\] |
 | big pool | 클래스 3 × 3만 = 9만 \[계산\] | 클래스 3 × 10만 = 30만 \[계산\] |
-| 특징 크기 (8B, framing×pooling 하나) | 33층 × 1.4만 × 4,096 × 2 B ≈ 3.9 GB \[계산\] | ≈ 9.7 GB \[계산\] (`--drop-feats` 권장) |
+| 특징 크기 (8B, framing×pooling 하나) | 33층 × 1.3만 × 4,096 × 2 B ≈ 3.5 GB \[계산\] | ≈ 8.4 GB \[계산\] (`--drop-feats` 권장) |
 | GPU 시간 (8B 한 backbone) | 몇 시간 이내 \[추정\] | 수 시간 \[추정\] |
 
-big pool은 특징을 저장하지 않고 점수만 매긴다. GPU 시간은 RTX 6000 Ada에서 잰 값이 아니다. 첫 실행 로그의 `windows/s`로 바로잡는다.
+NotInject는 prompt가 339개이고 한 분할에서 한 조각을 최대 3번 쓰므로 train/val/test 창이 대략 600/100/300개에서 멈춘다. 그래서 `datacard.shortfall`에 notinject가 늘 나온다. big pool은 특징을 저장하지 않고 점수만 매긴다. GPU 시간은 RTX 6000 Ada에서 잰 값이 아니다. 첫 실행 로그의 `windows/s`로 바로잡는다.
 
 ## 4. 결과 읽기
 
@@ -179,7 +190,7 @@ big pool은 특징을 저장하지 않고 점수만 매긴다. GPU 시간은 RTX
 
 | 파일 | 내용 |
 | --- | --- |
-| `report.md` | 게이트 표(주 TPR@2×10⁻⁴, 보조 AUROC), 부가 비교, 대비별 ℓ95와 compute ratio, lexical baseline, 대조군, 데이터 표 |
+| `report.md` | 게이트 표(`gate`, `gate_plan`. 주 TPR@2×10⁻⁴, 보조 AUROC), 부가 비교, 대비별 ℓ95와 compute ratio(ℓ95/L), `inj@heldout`(LLMail) 대비, lexical baseline, 대조군, 데이터 표 |
 | `probe_results.jsonl` | seed별 층별 값(run_id 포함) |
 | `layer_metrics.csv` | seed 평균 곡선과 CI |
 | `summary.json` | 기계가 읽는 요약. NaN은 문자열로 쓴다. `e11_backbones`에 backbone별 PASS 수가 있다(E1.1 기준: 2개 이상) |
@@ -191,7 +202,7 @@ PASS를 주장하기 전에 다음을 확인한다.
 
 1. **게이트 두 대비가 resolvable이고 곡선 최고값이 충분한가.** INCONCLUSIVE가 아니어야 한다.
 2. **lexical baseline이 이미 최고값에 닿지 않는가.** 닿는 대비는 표면 특징으로 풀리는 것이라 ℓ95가 깊이에 대해 말해 주지 않는다.
-3. **`span` pooling에서도 방향이 같은가.** 길이 경고가 있으면 이것을 먼저 본다.
+3. **`span` pooling에서도 방향이 같은가.** 길이 경고가 있으면 이것을 먼저 본다. span은 기본으로 같이 뽑는다. 나중에 따로 더하면 해당 framing의 특징을 처음부터 다시 뽑는다.
 4. **framing 두 개에서 같은 방향인가.**
 5. **shuffled-label control이 0.5 근처인가.**
 6. **`--split-mode source`에서도 유지되는가.**

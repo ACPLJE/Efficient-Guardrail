@@ -39,6 +39,7 @@ from . import synth
 
 SPLITS = ("train", "val", "test")
 BIN = 8
+NEAR = 1                        # length bins (x 8 tokens) within which a short bin is filled before looking further
 
 
 def _u(key: str, seed: int = SEED) -> float:
@@ -60,12 +61,16 @@ def assign_splits(by_cls: Dict[str, List[Dict]], split_mode: str, seed: int = SE
     class that has holdout rows fill train/val only.  test_only sources (LLMail-Inject) go to test in every mode.
     Mined paragraphs keep their source document's split."""
     items_all = [it for items in by_cls.values() for it in items]
-    hold = {it["group"] for it in items_all if it["holdout"]} if split_mode == "source" else set()
-    hold |= {it["group"] for it in items_all if it.get("test_only")}        # e.g. LLMail-Inject (plan 5.2)
+    preset = {it["group"] for it in items_all if it.get("split") in SPLITS}  # mined paragraphs: document split
+    src_hold = {it["group"] for it in items_all if it["holdout"]} if split_mode == "source" else set()
+    test_only = {it["group"] for it in items_all if it.get("test_only")}    # e.g. LLMail-Inject (plan 5.2)
+    hold = src_hold | test_only
     tv = {"train": SPLIT_FRACTIONS["train"], "val": SPLIT_FRACTIONS["val"]}
     tv = {k: v / sum(tv.values()) for k, v in tv.items()}
     for cls, items in by_cls.items():
-        cls_hold = any(it["group"] in hold for it in items)
+        # only a SOURCE-mode holdout turns the rest of the class into train/val; a test_only source (LLMail) is an
+        # extra held-out test set and leaves the other sources' 0.6/0.1/0.3 split alone
+        cls_hold = any(it["group"] in src_hold for it in items)
         for it in items:
             if it.get("split") in SPLITS:
                 continue
@@ -77,7 +82,7 @@ def assign_splits(by_cls: Dict[str, List[Dict]], split_mode: str, seed: int = SE
     for cls, items in by_cls.items():
         for it in items:
             owners[it["group"]].add(cls)
-    frozen = {g for g, cs in owners.items() if len(cs) > 1} | hold
+    frozen = {g for g, cs in owners.items() if len(cs) > 1} | hold | preset
     for items in by_cls.values():
         _fill_empty_splits(items, seed, frozen)
 
@@ -85,7 +90,7 @@ def assign_splits(by_cls: Dict[str, List[Dict]], split_mode: str, seed: int = SE
 def _fill_empty_splits(items: List[Dict], seed: int, frozen: Optional[set] = None) -> None:
     """A class with >= 3 groups gets at least one group in every split: an empty split takes the group of the largest
     split whose hash lies closest to the empty split's interval (deterministic).  Groups in `frozen` (shared with
-    another class, or holdout) never move."""
+    another class, holdout, or mined from a document whose background pieces are already split) never move."""
     frozen = frozen or set()
     groups: Dict[str, str] = {}
     for it in items:
@@ -225,8 +230,9 @@ def _int_targets(hist: Dict[int, float], n: int) -> Dict[int, int]:
 def stratified_draw(items: List[Dict], hist: Dict[int, float], n: int, max_reuse: int, rng: random.Random) -> List[Dict]:
     """n draws following `hist` over length bins, sources weighted equally within a bin.
 
-    A bin short of snippets hands its deficit to the bins NEAREST to it: first using unused distinct snippets anywhere,
-    only then reusing snippets (<= max_reuse each), again nearest first.  Returns fewer than n only when even reuse runs
+    A bin short of snippets hands its deficit to nearby bins, ring by ring: within +-NEAR bins it takes unused distinct
+    snippets, then reuse (<= max_reuse each); only then it walks further out, distinct before reuse at each distance.
+    Length matching therefore beats diversity beyond one bin (8 tokens).  Returns fewer than n only when even reuse runs
     out.  Source balancing uses Efraimidis-Spirakis keys in log space (log(u) * n_source), which cannot underflow."""
     if not items or n <= 0:
         return []
@@ -248,19 +254,26 @@ def stratified_draw(items: List[Dict], hist: Dict[int, float], n: int, max_reuse
         if t > take:
             deficit[b] = t - take
 
-    def spend(b0: int, need: int, cap) -> int:
+    def spend(b0: int, need: int, cap, d_lo: int, d_hi: int) -> int:
         for b in sorted(by_bin, key=lambda x: (abs(x - b0), x)):
-            if need <= 0:
+            if need <= 0 or abs(b - b0) > d_hi:
                 break
+            if abs(b - b0) < d_lo:
+                continue
             k = min(cap(b) - alloc[b], need)
             if k > 0:
                 alloc[b] += k
                 need -= k
         return need
-    for b in sorted(deficit):
-        deficit[b] = spend(b, deficit[b], lambda x: uniq[x])
-    for b in sorted(deficit):
-        deficit[b] = spend(b, deficit[b], lambda x: uniq[x] * max_reuse)
+    distinct, reuse = (lambda x: uniq[x]), (lambda x: uniq[x] * max_reuse)
+    far = max(by_bin) - min(by_bin) + max(deficit or [0]) + 1
+    for b in sorted(deficit):                                   # the tolerance ring first: distinct, then reuse
+        deficit[b] = spend(b, deficit[b], distinct, 0, NEAR)
+        deficit[b] = spend(b, deficit[b], reuse, 0, NEAR)
+    for d in range(NEAR + 1, far + 1):                          # then outward, distinct before reuse at each distance
+        for b in sorted(deficit):
+            deficit[b] = spend(b, deficit[b], distinct, d, d)
+            deficit[b] = spend(b, deficit[b], reuse, d, d)
     out: List[Dict] = []
     for b, k in alloc.items():
         lst = by_bin[b]
@@ -392,6 +405,9 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
     P = P or AGPaths.load()
     R = P.run(run)
     t0 = time.time()
+    # an interrupted rebuild must not leave the old data_manifest_sha next to new windows: drop the card first
+    R.datacard.unlink(missing_ok=True)
+    (R.data / "lineage.json").unlink(missing_ok=True)
     tok = get_tok("whitespace" if smoke else tok_name)
     rng = random.Random(seed)
     if smoke:
@@ -435,8 +451,8 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
                                                              "snippets": len(pool)})["no_background"] = True
                     continue
                 rows.append({"id": f"{split}-{cls}-{j:06d}", "split": split, "cls": cls, "source": sn["source"],
-                             "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"] or sn.get("test_only", False),
-                             "n_tok_snip": sn["n_tok"], **w})
+                             "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"],
+                             "test_only": bool(sn.get("test_only")), "n_tok_snip": sn["n_tok"], **w})
     counts = tok.count([r["text"] for r in rows])
     for r, n in zip(rows, counts):
         r["n_tok"] = int(n)

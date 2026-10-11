@@ -81,7 +81,7 @@ def registry_files(src: SnipSource, P: AGPaths) -> List[Path]:
             rev_ok = False
     if rev_ok and (P.sources / src.registry).is_dir():
         roots.append(P.sources / src.registry)
-    if src.hf_repo:
+    if src.hf_repo and rev_ok:                                  # a failed snapshot can leave a partial hub copy
         hub = _hub_cache_dir(src.hf_repo)
         if hub:
             roots.append(hub)

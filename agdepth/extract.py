@@ -55,6 +55,8 @@ TASK_PROMPTS = [
 SHARD = 1024
 FP16_MAX = 65000.0
 RESUME_KEYS = ("n", "layers", "d", "data_manifest_sha", "repo", "model_sha", "max_len", "dtype_model", "chat")
+DTYPES = {"bf16": "bfloat16", "bfloat16": "bfloat16", "fp16": "float16", "float16": "float16", "fp32": "float32",
+          "float32": "float32"}
 _WARNED: Dict[str, bool] = {}
 
 
@@ -190,8 +192,8 @@ def load(repo: str, device: Optional[str] = None, dtype: Optional[str] = None):
     from lgs4.backbone import load_backbone
     from lgs1.lgcore.model import _inner
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    dt = {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32,
-          "float32": torch.float32}[dtype] if dtype else (torch.bfloat16 if device.startswith("cuda") else torch.float32)
+    dt = DTYPES[dtype] if dtype else ("bfloat16" if device.startswith("cuda") else "float32")
+    dt = getattr(torch, dt)
     model, tok = load_backbone(repo, device=device, dtype=dt, attn="sdpa")
     dec = _inner(model)
     n_layers = len(dec.layers)

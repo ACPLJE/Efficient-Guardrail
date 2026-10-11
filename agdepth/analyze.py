@@ -89,28 +89,32 @@ class Contrast:
 
 
 def build_contrasts(test_scores: np.ndarray, tasks: Sequence[str], te_cls, te_gidx, big=None, big_cls=None,
-                    big_gidx=None) -> Dict[str, Contrast]:
-    """test_scores [T, S, n_test, L]; big [n_big, T, S, L] or None."""
+                    big_gidx=None, te_heldout=None) -> Dict[str, Contrast]:
+    """test_scores [T, S, n_test, L]; big [n_big, T, S, L] or None.  te_heldout (bool mask, group split mode only):
+    test windows of a test_only source (LLMail-Inject).  They are kept out of the regular contrasts -- the gate compares
+    in-distribution curves on both sides -- and get their own `<task>@heldout/<negset>` contrasts (plan E6.3)."""
     out = {}
     for ti, t in enumerate(tasks):
         task = TASKS[t]
-        pos = np.isin(te_cls, list(task.pos))
-        for ns, classes in task.eval_neg.items():
-            neg = np.isin(te_cls, list(classes))
-            if not pos.any() or not neg.any():
-                continue
-            Sp = test_scores[ti][:, pos, :]
-            Sn = test_scores[ti][:, neg, :]
-            gn = te_gidx[neg]
-            nb = 0
-            if big is not None:
-                bm = np.where(np.isin(big_cls, list(classes)))[0]
-                if bm.size:
-                    Sb = np.asarray(big[bm, ti]).transpose(1, 0, 2)          # [S, nb, L]
-                    Sn = np.concatenate([Sn, Sb], axis=1)
-                    gn = np.concatenate([gn, big_gidx[bm]])
-                    nb = bm.size
-            out[f"{t}/{ns}"] = Contrast(t, ns, Sp, Sn, te_gidx[pos], gn, nb)
+        pos_all = np.isin(te_cls, list(task.pos))
+        ho = te_heldout if te_heldout is not None else np.zeros(len(te_cls), bool)
+        for tag, pos in ((t, pos_all & ~ho), (f"{t}@heldout", pos_all & ho)):
+            for ns, classes in task.eval_neg.items():
+                neg = np.isin(te_cls, list(classes)) & ~ho
+                if not pos.any() or not neg.any():
+                    continue
+                Sp = test_scores[ti][:, pos, :]
+                Sn = test_scores[ti][:, neg, :]
+                gn = te_gidx[neg]
+                nb = 0
+                if big is not None:
+                    bm = np.where(np.isin(big_cls, list(classes)))[0]
+                    if bm.size:
+                        Sb = np.asarray(big[bm, ti]).transpose(1, 0, 2)          # [S, nb, L]
+                        Sn = np.concatenate([Sn, Sb], axis=1)
+                        gn = np.concatenate([gn, big_gidx[bm]])
+                        nb = bm.size
+                out[f"{tag}/{ns}"] = Contrast(tag, ns, Sp, Sn, te_gidx[pos], gn, nb)
     return out
 
 
@@ -161,8 +165,9 @@ def choose_primary(n_min: int, explicit: Optional[float]) -> Tuple[float, str]:
 
 
 def fpr_key(t: float) -> str:
-    """SPEC 7.3 key of a window FPR: 2e-4 -> '2e-4'."""
-    m, e = f"{t:.0e}".split("e")
+    """SPEC 7.3 key of a window FPR, exact: 2e-4 -> '2e-4', 1.6e-4 -> '1.6e-4', 0.015 -> '1.5e-2'."""
+    m, e = f"{t:.6e}".split("e")
+    m = m.rstrip("0").rstrip(".")
     return f"{m}e{int(e)}"
 
 
@@ -370,6 +375,8 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
     te_ids = [r["id"] for r in test]
     te_cls = np.array([r["cls"] for r in test])
     te_g = np.array([gi[r["group"]] for r in test])
+    te_ho = np.array([bool(r.get("test_only")) for r in test])
+    te_ho = te_ho if card["recipe"]["split_mode"] == "group" and te_ho.any() else None   # source mode: all held out
     big_ids = [r["id"] for r in big]
     big_cls = np.array([r["cls"] for r in big]) if big else None
     big_g = np.array([gi[r["group"]] for r in big]) if big else None
@@ -388,9 +395,18 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
         big_ok[c] = ok
         if big and not ok:
             print(f"[analyze] {'/'.join(c)}: big pool {why} -> test negatives only for this combo", file=sys.stderr)
-    n_min = min(gate_n_neg(te_cls, big_cls, big_ok[c]) for c in combos)
-    primary, primary_note = choose_primary(n_min, primary_fpr)
+    n_by = {c: gate_n_neg(te_cls[te_ho == False] if te_ho is not None else te_cls, big_cls, big_ok[c])  # noqa: E712
+            for c in combos}
+    primary, _ = choose_primary(max(n_by.values()), primary_fpr)
+    unres = ["/".join(c) for c in combos if not MX.resolvable(n_by[c], primary)]
+    src = "set on the command line (plan: 2e-4)" if primary_fpr and primary_fpr != PRIMARY_FPR else "plan §8.2 E0.3 / SPEC 6.5"
+    primary_note = (f"{src}; resolvable in every combo (min n_neg in the gate contrasts = {min(n_by.values()):,})"
+                    if not unres else
+                    f"{src}; NOT resolvable for {unres} (needs >= {int(np.ceil(5 / primary)):,} negatives for 5 expected "
+                    f"false positives) -> those combos are INCONCLUSIVE; the others are judged normally")
     targets = sorted(set(FPR_TARGETS) | {primary}, reverse=True)
+    if len({fpr_key(t) for t in targets}) != len(targets):
+        raise SystemExit(f"[analyze] FPR targets {targets} collide as result keys")
     pm = f"tpr@{primary:g}"
     results: Dict = {}
     table: List[Dict] = []
@@ -399,10 +415,10 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
     exp_id = exp_of_card(card)
     parents = [card.get("run_id", "")] + [_bb_run_id(R, b) for b in sorted({c[0] for c in combos})]
     model_sha = {}
-    for c in combos:
-        mp = R.feats(c[0], c[1]) / "meta.json"
-        if mp.exists():
-            model_sha[c[0]] = json.loads(mp.read_text()).get("model_sha") or ""
+    for b in sorted({c[0] for c in combos}):                 # the backbone run's lineage is the source of truth
+        lp = R.bb_run(b) / "lineage.json"
+        if lp.exists():
+            model_sha[b] = (json.loads(lp.read_text()).get("model_sha") or {}).get("backbone", "")
     acfg = {"data_manifest_sha": dsha, "primary_fpr": primary, "n_boot": n_boot, "combos": ["/".join(c) for c in combos],
             "gate": GATE, "l95_frac": L95_FRAC, "fpr_targets": list(FPR_TARGETS)}
     chash = LN.config_hash(acfg)
@@ -425,7 +441,7 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
         if bmm is not None and bids != big_ids:
             print(f"[analyze] {combo}: big-pool ids differ from {R.bigneg} -> ignored", file=sys.stderr)
             bmm = None
-        C = build_contrasts(sc, tasks, te_cls, te_g, bmm, big_cls, big_g)
+        C = build_contrasts(sc, tasks, te_cls, te_g, bmm, big_cls, big_g, te_ho)
         cur = {k: curves_of(c, targets) for k, c in C.items()}
         t0 = time.time()
         boot = bootstrap(C, len(groups), primary, n_boot, L1) if n_boot else {}
@@ -482,18 +498,19 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
         if g0:
             print(f"[analyze] {bb}/{framing}/{pool}: l95 harm={_fmt(g0['l95_shallow'], 0)} inj|instr={_fmt(g0['l95_deep'], 0)} "
                   f"/ L={L}  ratio={_fmt(g0['ratio'], 2)}{_ci(g0.get('ratio_ci'))}  {g0['verdict']}", flush=True)
-    lex = analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary, dsha)
+    lex = analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary, dsha, te_ho)
     write_rows(R.report / "probe_results.jsonl", run_id, probe_rows)
     e11 = {}
     for fr in sorted({c[1] for c in combos}):
         for po in sorted({c[2] for c in combos}):
-            gs = [g for g in gates if g["comparison"] == "gate" and g["metric"] == pm
-                  and g["combo"].endswith(f" / {fr} / {po}")]
-            if gs:
-                n_pass = sum(g["verdict"] == "PASS" for g in gs)
-                e11[f"{fr}/{po}"] = {"n_backbones": len(gs), "n_pass": n_pass,
-                                     "e11_criterion_2plus": n_pass >= 2,
-                                     "verdicts": {g["combo"].split(" / ")[0]: g["verdict"] for g in gs}}
+            for gname in ("gate", "gate_plan"):
+                gs = [g for g in gates if g["comparison"] == gname and g["metric"] == pm
+                      and g["combo"].endswith(f" / {fr} / {po}")]
+                if gs:
+                    n_pass = sum(g["verdict"] == "PASS" for g in gs)
+                    e11[f"{gname}:{fr}/{po}"] = {"n_backbones": len(gs), "n_pass": n_pass,
+                                                 "e11_criterion_2plus": n_pass >= 2,
+                                                 "verdicts": {g["combo"].split(" / ")[0]: g["verdict"] for g in gs}}
     # ---- outputs
     keys = sorted({k for r in table for k in r}, key=lambda k: (k not in ("backbone", "framing", "pooling", "contrast",
                                                                           "layer", "rel_depth"), k))
@@ -539,7 +556,7 @@ def _bb_run_id(R, bb: str) -> str:
     return f.read_text().strip() if f.exists() else ""
 
 
-def analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary: float, dsha: str) -> Dict:
+def analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary: float, dsha: str, te_ho=None) -> Dict:
     from .fit import stored_sha
     f = R.lex / "lex.test_scores.npz"
     if not f.exists():
@@ -558,7 +575,7 @@ def analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary: float
         else:
             print("[analyze] lexical big-pool scores missing or stale -> lexical baseline on test negatives only",
                   file=sys.stderr)
-    C = build_contrasts(sc, tasks, te_cls, te_g, bmm, big_cls, big_g)
+    C = build_contrasts(sc, tasks, te_cls, te_g, bmm, big_cls, big_g, te_ho)
     out = {}
     for k, c in C.items():
         cv = curves_of(c, [primary])
@@ -580,33 +597,37 @@ def report_md(s: Dict, card: Dict, results: Dict) -> str:
              "windows separate from instruction-heavy benign windows only at deeper layers. "
              f"Gate (plan E0.3): {s['gate']['rule']}, l95 = first layer reaching {s['gate']['l95_frac']:.0%} of the curve's "
              f"maximum. Primary metric `{pm}` ({s['primary_note']}).\n")
-    L.append("| backbone / framing / pooling | metric | l95 harm/all (rel) | l95 inj/instr (rel) | ratio [95% CI] | "
+    L.append("`gate` = PoC proposal (harm vs plain + harm_hard); `gate_plan` = the plan's negatives on the harm side "
+             "(harm vs plain). Which one feeds G0 is DECISIONS D-041 (e).\n")
+    L.append("| backbone / framing / pooling | comparison | metric | l95 harm (rel) | l95 inj/instr (rel) | ratio [95% CI] | "
              "P(ratio >= 1.5) | rel. gap [95% CI] | verdict |")
-    L.append("|---|---|---|---|---|---|---|---|")
+    L.append("|---|---|---|---|---|---|---|---|---|")
     for g in s["comparisons"]:
-        if g["comparison"] != "gate":
+        if g["comparison"] not in ("gate", "gate_plan"):
             continue
-        L.append(f"| {g['combo']} | {g['metric']} | {_fmt(g['l95_shallow'], 0)} ({_fmt(g['rel_shallow'], 2)}) | "
+        L.append(f"| {g['combo']} | {g['comparison']} ({g['shallow']}) | {g['metric']} | "
+                 f"{_fmt(g['l95_shallow'], 0)} ({_fmt(g['rel_shallow'], 2)}) | "
                  f"{_fmt(g['l95_deep'], 0)} ({_fmt(g['rel_deep'], 2)}) | {_fmt(g['ratio'], 2)}{_ci(g.get('ratio_ci'))} | "
                  f"{_fmt(g.get('p_ratio_ge_min'), 2)} | {_fmt(g['rel_gap'], 2)}{_ci(g.get('rel_gap_ci'))} | {g['verdict']} |")
     L.append("\nSecondary comparisons (same metric on both sides):\n")
     L.append("| backbone / framing / pooling | comparison | metric | l95 shallow side | l95 deep side | ratio [95% CI] |")
     L.append("|---|---|---|---|---|---|")
     for g in s["comparisons"]:
-        if g["comparison"] == "gate":
+        if g["comparison"] in ("gate", "gate_plan"):
             continue
         L.append(f"| {g['combo']} | {g['shallow']} vs {g['deep']} | {g['metric']} | {_fmt(g['l95_shallow'], 0)} | "
                  f"{_fmt(g['l95_deep'], 0)} | {_fmt(g['ratio'], 2)}{_ci(g.get('ratio_ci'))} |")
     L.append("\n## l95 and peak value per contrast\n")
+    L.append("`<task>@heldout` rows use the test_only source (LLMail-Inject) as positives and are not part of any gate.\n")
     L.append(f"| backbone / framing / pooling | contrast | n_pos | n_neg | l95 AUROC | max AUROC | l95 {pm} [95% CI] | "
-             f"max {pm} | {pm} at last layer |")
-    L.append("|---|---|---|---|---|---|---|---|---|")
+             f"compute ratio l95/L | max {pm} | {pm} at last layer |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|")
     for key, v in s["per_combo"].items():
         for k, e in v["summary"].items():
             m = e["metrics"]
             L.append(f"| {key.replace('|', ' / ')} | {k} | {e['n_pos']} | {e['n_neg']:,} | {_fmt(m['auroc']['l95'], 0)} | "
                      f"{_fmt(m['auroc']['max'])} | {_fmt(m[pm]['l95'], 0)}{_ci(m[pm].get('l95_ci'), nd=0)} | "
-                     f"{_fmt(m[pm]['max'])} | {_fmt(m[pm]['at_last'])} |")
+                     f"{_fmt(m[pm]['compute_ratio'], 2)} | {_fmt(m[pm]['max'])} | {_fmt(m[pm]['at_last'])} |")
     if s.get("lexical"):
         L.append("\n## Lexical baseline (hashed n-grams, same probe, no model)\n")
         L.append(f"| contrast | AUROC | {pm} |")
