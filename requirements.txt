@@ -16,5 +16,6 @@ pyyaml>=6
 packaging>=23
 pytest>=7
 # optional
+# matplotlib        # agdepth (depth PoC) figures; the numbers are written without it
 # kernels            # MXFP4 kernels for gpt-oss-safeguard-20b on Hopper; Ada falls back to bf16 dequant
 # vllm               # not needed in S1 (HF generate is enough for 4.6k prompts x 12 guards)
