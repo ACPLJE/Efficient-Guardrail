@@ -91,7 +91,7 @@ class CurveBoot:
     For TPR at a low target only the top-K negatives can set tau, so each (seed, layer) keeps its K largest negatives
     (K covers allowed + a wide margin); a replicate whose allowance falls past K recomputes exactly."""
 
-    def __init__(self, Sp: np.ndarray, Sn: np.ndarray, target: Optional[float], auroc_max_neg: int = 5000,
+    def __init__(self, Sp: np.ndarray, Sn: np.ndarray, target: Optional[float], auroc_max_neg: int = 20000,
                  seed: int = 0):
         self.Sp, self.Sn, self.target = np.asarray(Sp, np.float32), np.asarray(Sn, np.float32), target
         S, n_n, L = Sn.shape
@@ -112,6 +112,13 @@ class CurveBoot:
         sub = self.Sn[:, self.auc_idx, :]
         self.auc_order = np.argsort(sub, axis=1)
         self.auc_sorted = np.take_along_axis(sub, self.auc_order, 1)
+        # AUROC replicates use a negative subset; shift them by (full - subset) point estimate so the bands and the l95
+        # distribution are centred on the reported curve instead of on the subset's
+        self.auc_offset = np.zeros((S, L))
+        if self.auc_idx.size < n_n:
+            for s in range(S):
+                for l in range(L):
+                    self.auc_offset[s, l] = auroc(self.Sp[s, :, l], self.Sn[s, :, l]) - auroc(self.Sp[s, :, l], sub[s, :, l])
 
     def tpr(self, wp: np.ndarray, wn: np.ndarray) -> np.ndarray:
         """Seed-mean TPR curve [L] under weights."""
@@ -144,7 +151,7 @@ class CurveBoot:
         for s in range(self.S):
             for l in range(self.L):
                 cum = np.cumsum(wn_sub[self.auc_order[s, :, l]])
-                out[s, l] = auroc_w(self.Sp[s, :, l], wp, self.auc_sorted[s, :, l], cum)
+                out[s, l] = auroc_w(self.Sp[s, :, l], wp, self.auc_sorted[s, :, l], cum) + self.auc_offset[s, l]
         return out.mean(0)
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -121,27 +122,52 @@ def fit_matrix(get_layer, n_layers1: int, rows: Sequence[Dict], seeds: Sequence[
     return out
 
 
-def _save(D: Path, pool: str, res: Dict, extra: Dict) -> None:
+def savez_atomic(path: Path, **arrays) -> None:
+    """np.savez through a temp file + os.replace (a killed job never leaves a half-written npz)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp.npz")
+    np.savez(tmp, **arrays)
+    os.replace(tmp, path)
+
+
+def stored_sha(path: Path) -> str:
+    """data_manifest_sha recorded in a probes / scores npz ('' if absent or unreadable)."""
+    try:
+        with np.load(path) as z:
+            return str(z["data_manifest_sha"]) if "data_manifest_sha" in z.files else ""
+    except Exception:
+        return ""
+
+
+def probes_current(R, bb: str, framing: str, pool: str, dsha: str) -> bool:
+    D = R.probes(bb, framing)
+    return all(stored_sha(D / f"{pool}.{k}.npz") == dsha for k in ("probes", "test_scores"))
+
+
+def _save(D: Path, pool: str, res: Dict, extra: Dict, dsha: str) -> None:
+    from ag.harness.writer import atomic_write_json
     D.mkdir(parents=True, exist_ok=True)
-    np.savez(D / f"{pool}.probes.npz", W=res["W"], b=res["b"], lam=res["lam"], val_auc=res["val_auc"], mu=res["mu"],
-             sd=res["sd"], tasks=np.array(res["tasks"]), seeds=np.array(res["seeds"]))
-    np.savez(D / f"{pool}.test_scores.npz", scores=res["scores"], test_ids=np.array(res["test_ids"]),
-             tasks=np.array(res["tasks"]), seeds=np.array(res["seeds"]))
+    savez_atomic(D / f"{pool}.probes.npz", W=res["W"], b=res["b"], lam=res["lam"], val_auc=res["val_auc"], mu=res["mu"],
+                 sd=res["sd"], tasks=np.array(res["tasks"]), seeds=np.array(res["seeds"]), data_manifest_sha=np.array(dsha))
+    savez_atomic(D / f"{pool}.test_scores.npz", scores=res["scores"], test_ids=np.array(res["test_ids"]),
+                 tasks=np.array(res["tasks"]), seeds=np.array(res["seeds"]), data_manifest_sha=np.array(dsha))
     summ = {"tasks": res["tasks"], "seeds": res["seeds"], "seconds": res["seconds"], "controls_shuffled_auroc": res["controls"],
             "val_auroc_mean": {t: [round(float(x), 4) for x in res["val_auc"][i].mean(0)] for i, t in enumerate(res["tasks"])},
             "lambda_counts": {t: {f"{v:g}": int((res["lam"][i] == v).sum()) for v in np.unique(res["lam"][i])}
-                              for i, t in enumerate(res["tasks"])}, **extra}
-    (D / f"{pool}.fit.json").write_text(json.dumps(summ, indent=2))
+                              for i, t in enumerate(res["tasks"])}, "data_manifest_sha": dsha, **extra}
+    atomic_write_json(D / f"{pool}.fit.json", summ)
 
 
 def fit(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: Sequence[str] = DEFAULT_POOLINGS,
         seeds: Optional[Sequence[int]] = None, lambdas: Sequence[float] = LAMBDAS, device: Optional[str] = None,
         controls: bool = True, P: Optional[AGPaths] = None) -> None:
     from .extract import load_feats
-    from .windows import read_jsonl_gz
+    from .windows import load_card, read_jsonl_gz
     P = P or AGPaths.load()
     R = P.run(run)
-    card = json.loads(R.datacard.read_text())
+    card = load_card(R)
+    dsha = card["data_manifest_sha"]
     seeds = list(seeds) if seeds else list(card["recipe"]["profile"]["seeds"])
     rows = read_jsonl_gz(R.windows)
     dev = _device(device)
@@ -149,33 +175,37 @@ def fit(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: Seq
     for framing in framings:
         for pool in poolings:
             mm, ids, meta = load_feats(R, bb.key, framing, pool)
-            if ids != [r["id"] for r in rows]:
-                raise SystemExit(f"feature ids do not match {R.windows}: re-run extract (the dataset was rebuilt?)")
+            if meta.get("data_manifest_sha") != dsha or ids != [r["id"] for r in rows]:
+                raise SystemExit(f"{R.feats(bb.key, framing)}: features were extracted from another dataset "
+                                 f"({meta.get('data_manifest_sha')} != {dsha}); re-run extract")
             res = fit_matrix(lambda l: mm[l], meta["layers"], rows, seeds, lambdas, dev, controls,
                              f"{bb.key}/{framing}/{pool}")
             _save(R.probes(bb.key, framing), pool, res, {"backbone": bb.key, "framing": framing, "pooling": pool,
-                                                         "layers": meta["layers"], "d": meta["d"], "device": dev})
+                                                         "layers": meta["layers"], "d": meta["d"], "device": dev}, dsha)
             print(f"[fit] {bb.key}/{framing}/{pool} done in {res['seconds']}s -> {R.probes(bb.key, framing)}")
     fit_lex(run, seeds, lambdas, dev, P)
 
 
 def fit_lex(run: str, seeds: Sequence[int], lambdas: Sequence[float] = LAMBDAS, device: Optional[str] = None,
             P: Optional[AGPaths] = None, force: bool = False) -> None:
-    from .windows import read_jsonl_gz
+    from .windows import load_card, read_jsonl_gz
     P = P or AGPaths.load()
     R = P.run(run)
-    if (R.lex / "lex.test_scores.npz").exists() and not force:
-        return
+    dsha = load_card(R)["data_manifest_sha"]
+    big_ok = not R.bigneg.exists() or stored_sha(R.lex / "lex.bigneg_scores.npz") == dsha
+    if stored_sha(R.lex / "lex.test_scores.npz") == dsha and big_ok and not force:
+        return                                                # same dataset: the baseline is current
     rows = read_jsonl_gz(R.windows)
     X = lex_features([r["text"] for r in rows])
     res = fit_matrix(lambda l: X, 1, rows, seeds, lambdas, _device(device), False, "lexical")
-    _save(R.lex, "lex", res, {"backbone": "lexical", "features": "signed hashed unigram+bigram, 8192 dims"})
+    _save(R.lex, "lex", res, {"backbone": "lexical", "features": "signed hashed unigram+bigram, 8192 dims"}, dsha)
+    (R.lex / "lex.bigneg_scores.npz").unlink(missing_ok=True)
     if R.bigneg.exists():
         big = read_jsonl_gz(R.bigneg)
         Xb = (lex_features([r["text"] for r in big]) - res["mu"][0]) / res["sd"][0]
         sc = np.einsum("nd,tsd->nts", Xb, res["W"][:, :, 0].astype(np.float32)) + res["b"][None, :, :, 0]
-        np.savez(R.lex / "lex.bigneg_scores.npz", scores=sc[..., None].astype(np.float32),
-                 ids=np.array([r["id"] for r in big]))
+        savez_atomic(R.lex / "lex.bigneg_scores.npz", scores=sc[..., None].astype(np.float32),
+                     ids=np.array([r["id"] for r in big]), data_manifest_sha=np.array(dsha))
     print(f"[fit] lexical baseline -> {R.lex}")
 
 

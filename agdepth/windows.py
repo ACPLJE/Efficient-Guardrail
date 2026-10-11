@@ -57,9 +57,11 @@ def split_of(key: str, fractions: Dict[str, float] = SPLIT_FRACTIONS, seed: int 
 def assign_splits(by_cls: Dict[str, List[Dict]], split_mode: str, seed: int = SEED) -> None:
     """Split per GROUP key, consistently across classes (the LG pool's near-duplicate groups can hold a harmful and a
     benign prompt).  split_mode=source: a group with any holdout row goes to test as a whole, and the other groups of a
-    class that has holdout rows fill train/val only.  Mined paragraphs keep their document's split."""
+    class that has holdout rows fill train/val only.  test_only sources (LLMail-Inject) go to test in every mode.
+    Mined paragraphs keep their source document's split."""
     items_all = [it for items in by_cls.values() for it in items]
     hold = {it["group"] for it in items_all if it["holdout"]} if split_mode == "source" else set()
+    hold |= {it["group"] for it in items_all if it.get("test_only")}        # e.g. LLMail-Inject (plan 5.2)
     tv = {"train": SPLIT_FRACTIONS["train"], "val": SPLIT_FRACTIONS["val"]}
     tv = {k: v / sum(tv.values()) for k, v in tv.items()}
     for cls, items in by_cls.items():
@@ -129,9 +131,22 @@ def trim_to_tokens(text: str, tok, hi: int) -> str:
 VARIANT_SOURCES = ("gen_instr", "mined_instr", "bg_plain")      # benign: a sentence prefix keeps the label
 
 
+def _keeps_label(it: Dict, text: str) -> bool:
+    """A shortened benign snippet keeps its class only if it still meets that class's rule: mined paragraphs are
+    re-checked with the mining rule, template text must keep at least one imperative sentence."""
+    if it["source"] == "mined_instr":
+        return S.is_instruction_heavy(text)
+    if it["source"] == "bg_plain":
+        return S.is_plain(text)
+    if it["source"] == "gen_instr":
+        return S.imperative_count(text)[0] >= 1
+    return True
+
+
 def half_variants(items: List[Dict]) -> List[Dict]:
-    """First half of the sentences of benign multi-sentence snippets (same group, so splits stay clean).  Gives the
-    instruction-heavy and plain classes coverage of the short length bins the positive classes occupy."""
+    """First half of the sentences of benign multi-sentence snippets (same group, so splits stay clean), kept only when
+    the half still meets the class rule.  Gives the instruction-heavy and plain classes coverage of the short length bins
+    the positive classes occupy."""
     out = []
     for it in items:
         if it["source"] not in VARIANT_SOURCES:
@@ -139,31 +154,43 @@ def half_variants(items: List[Dict]) -> List[Dict]:
         sents = _SENT_END.split(it["text"])
         if len(sents) < 3:
             continue
-        out.append({**it, "sid": it["sid"] + "#half", "text": " ".join(sents[:math.ceil(len(sents) / 2)]),
-                    "meta": {**it.get("meta", {}), "variant": "half"}})
+        half = " ".join(sents[:math.ceil(len(sents) / 2)])
+        if _keeps_label(it, half):
+            out.append({**it, "sid": it["sid"] + "#half", "text": half, "meta": {**it.get("meta", {}), "variant": "half"}})
     return out
 
 
 def length_filter(by_cls: Dict[str, List[Dict]], tok, band: Tuple[int, int]) -> Dict[str, Dict]:
+    """Trim long mined paragraphs (re-checking their class rule), add half variants, drop exact duplicates created by
+    either step (the full snippet wins), then keep snippets inside the band."""
     lo, hi = band
     stats = {}
     for cls in list(by_cls):
-        by_cls[cls] = by_cls[cls] + half_variants(by_cls[cls])
-    for cls, items in by_cls.items():
+        items = by_cls[cls]
         n0 = len(items)
+        trimmed = []
         for it in items:
-            if it["source"] in ("mined_instr", "bg_plain"):
-                n = tok.count([it["text"]])[0]
-                if n > hi:
-                    it["text"] = trim_to_tokens(it["text"], tok, hi)
-        counts = tok.count([it["text"] for it in items]) if items else []
+            if it["source"] in ("mined_instr", "bg_plain") and tok.count([it["text"]])[0] > hi:
+                t = trim_to_tokens(it["text"], tok, hi)
+                if not t or not _keeps_label(it, t):
+                    continue
+                it = {**it, "text": t}
+            trimmed.append(it)
+        seen, uniq = set(), []
+        for it in trimmed + half_variants(trimmed):
+            k = S.exact_key(it["text"])
+            if k in seen:
+                continue
+            seen.add(k)
+            uniq.append(it)
+        counts = tok.count([it["text"] for it in uniq]) if uniq else []
         keep = []
-        for it, n in zip(items, counts):
+        for it, n in zip(uniq, counts):
             if lo <= n <= hi:
                 it["n_tok"] = int(n)
                 keep.append(it)
         by_cls[cls] = keep
-        stats[cls] = {"n_in": n0, "n_kept": len(keep)}
+        stats[cls] = {"n_in": n0, "n_after_trim_variants_dedup": len(uniq), "n_kept": len(keep)}
     return stats
 
 
@@ -185,40 +212,59 @@ def target_hist(by_cls: Dict[str, List[Dict]], band: Tuple[int, int], pos=("harm
     return {b: v / s for b, v in h.items() if v > 0}
 
 
+def _int_targets(hist: Dict[int, float], n: int) -> Dict[int, int]:
+    """Integer bin targets summing to n (largest remainder)."""
+    raw = {b: n * p for b, p in hist.items()}
+    out = {b: int(math.floor(v)) for b, v in raw.items()}
+    rest = n - sum(out.values())
+    for b in sorted(raw, key=lambda b: (-(raw[b] - out[b]), b))[:max(0, rest)]:
+        out[b] += 1
+    return out
+
+
 def stratified_draw(items: List[Dict], hist: Dict[int, float], n: int, max_reuse: int, rng: random.Random) -> List[Dict]:
-    """n draws (with reuse <= max_reuse) following `hist` over length bins; sources weighted equally; bins short of
-    capacity hand their remainder to the nearest bins.  Returns fewer than n only when capacity runs out."""
+    """n draws following `hist` over length bins, sources weighted equally within a bin.
+
+    A bin short of snippets hands its deficit to the bins NEAREST to it: first using unused distinct snippets anywhere,
+    only then reusing snippets (<= max_reuse each), again nearest first.  Returns fewer than n only when even reuse runs
+    out.  Source balancing uses Efraimidis-Spirakis keys in log space (log(u) * n_source), which cannot underflow."""
     if not items or n <= 0:
         return []
     src_n = Counter(it["source"] for it in items)
     by_bin: Dict[int, List[Dict]] = defaultdict(list)
     for it in items:
         by_bin[it["n_tok"] // BIN].append(it)
-    for b, lst in by_bin.items():         # source-balanced order: Efraimidis-Spirakis keys u^(1/w), w = 1/n_source
-        keyed = [(rng.random() ** (src_n[it["source"]]), it) for it in lst]
+    for b, lst in by_bin.items():
+        keyed = [(math.log(1.0 - rng.random()) * src_n[it["source"]], it) for it in lst]
         keyed.sort(key=lambda x: -x[0])
         by_bin[b] = [it for _, it in keyed]
-    cap = {b: len(v) * max_reuse for b, v in by_bin.items()}
-    want = {b: n * p for b, p in hist.items()}
-    alloc = {b: min(int(round(w)), cap.get(b, 0)) for b, w in want.items()}
-    short = n - sum(alloc.values())
-    order = sorted(cap, key=lambda b: (min(abs(b - h) for h in hist) if hist else 0, b))
-    while short > 0:
-        moved = False
-        for b in order:
-            room = cap[b] - alloc.get(b, 0)
-            if room > 0 and short > 0:
-                k = min(room, short)
-                alloc[b] = alloc.get(b, 0) + k
-                short -= k
-                moved = True
-        if not moved:
-            break
+    uniq = {b: len(v) for b, v in by_bin.items()}
+    alloc = {b: 0 for b in by_bin}
+    deficit: Dict[int, int] = {}
+    for b, t in _int_targets(hist, n).items():
+        take = min(t, uniq.get(b, 0))
+        if b in alloc:
+            alloc[b] += take
+        if t > take:
+            deficit[b] = t - take
+
+    def spend(b0: int, need: int, cap) -> int:
+        for b in sorted(by_bin, key=lambda x: (abs(x - b0), x)):
+            if need <= 0:
+                break
+            k = min(cap(b) - alloc[b], need)
+            if k > 0:
+                alloc[b] += k
+                need -= k
+        return need
+    for b in sorted(deficit):
+        deficit[b] = spend(b, deficit[b], lambda x: uniq[x])
+    for b in sorted(deficit):
+        deficit[b] = spend(b, deficit[b], lambda x: uniq[x] * max_reuse)
     out: List[Dict] = []
     for b, k in alloc.items():
-        lst = by_bin.get(b, [])
-        for j in range(k):
-            out.append(lst[j % len(lst)])
+        lst = by_bin[b]
+        out += [lst[j % len(lst)] for j in range(k)]
     rng.shuffle(out)
     return out[:n]
 
@@ -253,7 +299,7 @@ class Backgrounds:
             a = self.rng.randrange(0, max(1, len(text) - n_chars))
             m = re.search(r"\s", text[a:a + 200])
             a = a + (m.end() if m else 0)
-            chunk = text[a:a + n_chars]
+            chunk = text[a:a + n_chars].lstrip()
             if n_tokens <= 0:
                 return "", d
             ids, offs = self.tok.encode_with_offsets(chunk)
@@ -271,11 +317,14 @@ def make_window(snip: Dict, bg: Backgrounds, window: int, rng: random.Random, se
     btxt, doc = got
     depth = rng.uniform(*DEPTH_RANGE)
     k = _snap(btxt, int(round(depth * len(btxt)))) if btxt else 0
+    if btxt and not btxt[:k].strip():           # never let the snippet open the window (position 0 = attention sink)
+        k = _snap(btxt, int(round(DEPTH_RANGE[0] * len(btxt))) + 40)
     pre, suf = btxt[:k].rstrip(), btxt[k:].lstrip()
     head = pre + sep if pre else ""
     text = head + snip["text"] + (sep + suf if suf else "")
     a = len(head)
-    return {"text": text, "snip_span": [a, a + len(snip["text"])], "bg_doc": doc["id"], "bg_domain": doc["domain"],
+    return {"text": text, "snip_span": [a, a + len(snip["text"])], "bg_doc": doc["id"],
+            "bg_src": doc.get("doc", doc["id"]), "bg_domain": doc["domain"],
             "depth": round(k / max(1, len(btxt)), 4) if btxt else 0.0}
 
 
@@ -297,17 +346,33 @@ def read_jsonl_gz(path: Path) -> List[Dict]:
 
 
 def audit(rows: Sequence[Dict]) -> Dict:
-    """Leakage checks across splits: snippet ids, groups, exact snippet texts and background documents."""
-    sets = {k: defaultdict(set) for k in ("sid", "group", "bg_doc", "snip_key")}
+    """Leakage checks across splits: snippet ids, groups, exact snippet texts, background pieces and the source
+    documents they were cut from (pieces of one book never straddle splits)."""
+    sets = {k: defaultdict(set) for k in ("sid", "group", "bg_doc", "bg_src", "snip_key")}
     for r in rows:
         sets["sid"][r["sid"]].add(r["split"])
         sets["group"][r["group"]].add(r["split"])
         sets["bg_doc"][r["bg_doc"]].add(r["split"])
+        sets["bg_src"][r.get("bg_src", r["bg_doc"])].add(r["split"])
         a, b = r["snip_span"]
         sets["snip_key"][S.exact_key(r["text"][a:b])].add(r["split"])
     out = {f"n_{k}_in_several_splits": sum(1 for v in d.values() if len(v) > 1) for k, d in sets.items()}
     out["pass"] = all(v == 0 for v in out.values())
     return out
+
+
+HASH_FIELDS = ("id", "split", "cls", "source", "group", "text", "snip_span")
+
+
+def content_sha(rows: Sequence[Dict]) -> str:
+    """Content hash of the windows (not of the gzip bytes, whose header embeds a timestamp)."""
+    from lgs1.lineage import canonical_hash
+    return canonical_hash([{k: r.get(k) for k in HASH_FIELDS} for r in rows])[:16]
+
+
+def data_manifest_sha(card: Dict) -> str:
+    """The dataset identity every derived file records: windows + big pool (+ recipe)."""
+    return card["data_manifest_sha"]
 
 
 def _len_stats(xs: Sequence[int]) -> Dict:
@@ -322,6 +387,8 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
           bg_domains: Sequence[str] = BG_DOMAINS, smoke: bool = False, seed: int = SEED,
           sources_only: Optional[Sequence[str]] = None, P: Optional[AGPaths] = None) -> Dict:
     from lgs2.tok import get_tok
+    from ag.harness.writer import atomic_write_json
+    from . import lineage as LN
     P = P or AGPaths.load()
     R = P.run(run)
     t0 = time.time()
@@ -334,7 +401,7 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
     if not docs:
         raise SystemExit(f"[build] no background documents for {list(bg_domains)}: build the LG v2 haystack "
                          f"(python s2ctl.py ...) or download the streams (bash slurm/s1_download_login.sh --only pg19,arxiv,...)")
-    doc_split = {d["id"]: split_of("doc:" + d["id"], seed=seed) for d in docs}
+    doc_split = {d.get("doc", d["id"]): split_of("doc:" + d.get("doc", d["id"]), seed=seed) for d in docs}
     by_cls, src_report = S.collect_snippets(P, docs, doc_split, smoke=smoke, seed=seed, only=sources_only)
     missing = [c for c in CLASSES if not by_cls.get(c)]
     for c in missing:
@@ -348,7 +415,8 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
                          f"{ {c: len_stats.get(c) for c in empty} } -- widen it with --snip-tok LO,HI")
     assign_splits(by_cls, split_mode, seed)
     hist = target_hist(by_cls, profile.snip_tok)
-    bgs = {s: Backgrounds([d for d in docs if doc_split[d["id"]] == s], tok, random.Random(f"{seed}-{s}")) for s in SPLITS}
+    bgs = {s: Backgrounds([d for d in docs if doc_split[d.get("doc", d["id"])] == s], tok, random.Random(f"{seed}-{s}"))
+           for s in SPLITS}
     for s, b in bgs.items():
         if not b.docs:
             raise SystemExit(f"[build] no background documents in split {s} (too few documents: {len(docs)})")
@@ -363,10 +431,12 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
             for j, sn in enumerate(draws):
                 w = make_window(sn, bgs[split], profile.window, rng)
                 if w is None:
+                    shortfall.setdefault(f"{cls}/{split}", {"want": n_by_split[split], "got": len(draws),
+                                                             "snippets": len(pool)})["no_background"] = True
                     continue
                 rows.append({"id": f"{split}-{cls}-{j:06d}", "split": split, "cls": cls, "source": sn["source"],
-                             "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"], "n_tok_snip": sn["n_tok"],
-                             **w})
+                             "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"] or sn.get("test_only", False),
+                             "n_tok_snip": sn["n_tok"], **w})
     counts = tok.count([r["text"] for r in rows])
     for r, n in zip(rows, counts):
         r["n_tok"] = int(n)
@@ -386,10 +456,18 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
                                 "sid": sn["sid"], "group": sn["group"], "holdout": sn["holdout"],
                                 "n_tok_snip": sn["n_tok"], **w})
         _write_jsonl_gz(R.bigneg, big)
-    rec = recipe(profile, split_mode, bg_domains if not smoke else ["smoke"], tok_name if not smoke else "whitespace")
+    else:
+        R.bigneg.unlink(missing_ok=True)          # never leave a big pool from an earlier recipe behind
+    found = sorted({d["domain"] for d in docs})
+    used_sources = sorted(k for k, v in src_report.items() if v.get("status") in ("ok", "smoke"))
+    rec = recipe(profile, split_mode, found, tok_name if not smoke else "whitespace", seed, used_sources)
+    w_sha, b_sha = content_sha(rows), content_sha(big)
+    from lgs1.lineage import canonical_hash
+    dsha = canonical_hash({"windows": w_sha, "bigneg": b_sha, "recipe": recipe_hash(rec)})[:16]
     card = {
         "run": run, "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": round(time.time() - t0, 1),
         "recipe": rec, "recipe_hash": recipe_hash(rec), "smoke": smoke,
+        "windows_sha": w_sha, "bigneg_sha": b_sha, "data_manifest_sha": dsha,
         "backgrounds": where, "n_background_docs": {s: len(b.docs) for s, b in bgs.items()},
         "sources": src_report, "snippets": S.class_summary(by_cls), "length_filter": len_stats,
         "length_hist_target": {str(b * BIN): round(p, 4) for b, p in sorted(hist.items())},
@@ -410,7 +488,14 @@ def build(run: str, profile: Profile, split_mode: str = "group", tok_name: str =
                                       f"{off}; compare the `span` pooling (no dilution) before reading a depth gap")
             print(f"[build] WARNING {card['length_warning']}", file=sys.stderr)
     R.data.mkdir(parents=True, exist_ok=True)
-    R.datacard.write_text(json.dumps(card, indent=2, ensure_ascii=False), encoding="utf-8")
+    exp_id = exp_of(profile)
+    chash = LN.config_hash(rec)
+    rid = LN.make_run_id(exp_id, "build", "none", f"depthwin-{profile.window}", chash, seed)
+    lin = LN.start(R.data, rid, exp_id, chash, seed=seed, producer="mock" if smoke else "reference", model_sha={},
+                   data_manifest_sha=dsha, fresh=True)
+    card["run_id"] = rid
+    atomic_write_json(R.datacard, card)
+    LN.finish(R.data, lin)
     print(f"[build] {len(rows):,} windows (+{len(big):,} bigneg) -> {R.windows}")
     for s in SPLITS:
         print(f"[build]   {s:5s} " + "  ".join(f"{c}={n}" for c, n in sorted(card['windows'][s].items())))
@@ -435,6 +520,18 @@ def main(argv=None) -> int:
     build(a.run, profile_from_args(a), a.split_mode, a.tok, [d for d in a.bg_domains.split(",") if d], a.smoke, a.seed,
           [s for s in a.sources.split(",") if s] or None)
     return 0
+
+
+def exp_of(profile: Profile) -> str:
+    """E0.3 for smoke/quick, E1.1 for full (an overridden profile keeps its base name before '+')."""
+    from .config import EXP_OF_PROFILE
+    return EXP_OF_PROFILE.get(profile.name.split("+")[0], "E0.3")
+
+
+def load_card(R) -> Dict:
+    if not R.datacard.exists():
+        raise SystemExit(f"{R.datacard} missing: run build first")
+    return json.loads(R.datacard.read_text())
 
 
 def add_profile_overrides(ap: argparse.ArgumentParser) -> None:

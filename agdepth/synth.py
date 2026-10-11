@@ -178,7 +178,7 @@ def smoke_background(n_docs: int = 40, n_par: int = 12, seed: int = 0) -> List[D
     docs = []
     for d in range(n_docs):
         pars = [" ".join(smoke_sentence(rng) for _ in range(rng.randint(2, 5))) for _ in range(n_par)]
-        docs.append({"id": f"smoke-bg-{d}", "domain": "smoke", "text": "\n\n".join(pars)})
+        docs.append({"id": f"smoke-bg-{d}", "doc": f"smoke-bg-{d}", "domain": "smoke", "text": "\n\n".join(pars)})
     return docs
 
 

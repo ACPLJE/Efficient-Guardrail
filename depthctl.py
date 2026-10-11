@@ -2,51 +2,139 @@
 """Depth-asymmetry PoC (plan 2026-10-10, E0.3 / E1.1): does the SAME backbone separate harmful windows at shallow
 layers but injection windows (vs instruction-heavy benign text) only at deeper layers?
 
-    python depthctl.py doctor                                   # what is cached / missing
+    python depthctl.py doctor                                   # what is cached / missing, where jobs will write
     python depthctl.py download [--with-s1]                     # login node only
     python depthctl.py smoke                                    # offline end-to-end check (tiny model, CPU, ~1 min)
-    python depthctl.py run --run e03 --profile quick --backbones qwen3guard_0.6b,llama31_8b --sbatch
-        = build (CPU) -> per backbone: extract + fit + score (GPU) -> analyze (CPU), chained with afterok
-    python depthctl.py build|extract|fit|score|analyze|pipeline ... [--sbatch] [--dry-run]
+    python depthctl.py run --run e03 --profile quick --backbones e03 --sbatch [--submit]
+        = build -> per backbone: extract + fit + score -> analyze; --sbatch renders the scripts and runs
+          `sbatch --test-only` on each (agctl convention), --submit then submits them chained with afterok
+    python depthctl.py build|extract|fit|score|analyze|pipeline ... [--sbatch [--submit]]
 
-Outputs under $AG_OUT/<run> (default $LG_OUT/agdepth/<run>); the verdict is in report/report.md.
-See docs/depth_poc_runbook.md.
+Jobs source slurm/ag_common.sh (env/ag.env, the Python 3.11 AG venv, offline mode; CLAUDE.md 4, D-001).  Outputs go
+to $AGDEPTH_OUT/<run> (default $AG_OUT/poc/agdepth/<run>, else $LG_OUT/agdepth/<run>); the verdict is in
+report/report.md.  This PoC is not yet a SPEC experiment (DECISIONS D-041).  See docs/depth_poc_runbook.md.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shlex
+import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from lgs1.paths import env  # noqa: E402
-from agdepth.config import (BACKBONES, BG_DOMAINS, DEFAULT_POOLINGS, E03_BACKBONES, E11_BACKBONES, PROFILES,  # noqa: E402
-                            SNIP_SOURCES, AGPaths, backbone)
+from agdepth.config import (BACKBONE_ALIASES, BACKBONES, BG_DOMAINS, DEFAULT_POOLINGS, FRAMINGS, LAMBDAS,  # noqa: E402
+                            POOLINGS, PROFILES, SNIP_SOURCES, TRAIN_SUBSAMPLE, AGPaths, backbone, is_local_model)
 
 TIME = {"build": "04:00:00", "pipeline": "24:00:00", "analyze": "06:00:00"}
+_REPO_ID = re.compile(r"^[A-Za-z0-9][\w.\-]*/[\w.\-]+$")
 
 
-def _submit(job: str, body: str, time_key: str, a, dep: Optional[str] = None, cpu: bool = False,
-            min_gpu_gb: int = 24, mem: Optional[str] = None, cpus: Optional[str] = None) -> Optional[str]:
-    import s1ctl
-    t = env(f"AG_TIME_{time_key.upper()}", TIME[time_key])
-    return s1ctl.write_sbatch(job, body, t, dep=dep, dry_run=getattr(a, "dry_run", False), cpu=cpu,
-                              min_gpu_gb=min_gpu_gb, mem=mem, cpus=cpus)
+# ------------------------------------------------------------------------------------------------
+# validation (everything is checked on the login node, before any script is rendered)
+# ------------------------------------------------------------------------------------------------
+def _abs_if_local(x: str) -> str:
+    p = Path(x).expanduser()
+    return str(p.resolve()) if p.exists() else x
 
 
+def _expand_backbones(spec: str) -> List[str]:
+    out: List[str] = []
+    for item in [x for x in spec.split(",") if x]:
+        out += BACKBONE_ALIASES.get(item, [item])
+    bad = [b for b in out if b not in BACKBONES and not is_local_model(b) and not _REPO_ID.match(b)]
+    if bad:
+        raise SystemExit(f"[depthctl] unknown backbone(s) {bad}: use {sorted(BACKBONES)}, an alias {sorted(BACKBONE_ALIASES)}, "
+                         f"an org/name repo id or a local model directory")
+    return [_abs_if_local(b) for b in dict.fromkeys(out)]
+
+
+def _validate(a) -> None:
+    for name, allowed in (("framings", FRAMINGS), ("poolings", POOLINGS)):
+        if hasattr(a, name):
+            vals = [x for x in getattr(a, name).split(",") if x]
+            bad = [x for x in vals if x not in allowed]
+            if bad or not vals:
+                raise SystemExit(f"[depthctl] --{name} {getattr(a, name)!r}: allowed {list(allowed)}")
+    if getattr(a, "backbone", None):
+        a.backbone = _expand_backbones(a.backbone)[0]
+    if getattr(a, "backbones", None):
+        a.backbones = ",".join(_expand_backbones(a.backbones))
+    if getattr(a, "tok", None):
+        a.tok = _abs_if_local(a.tok)
+    if hasattr(a, "profile"):
+        from agdepth.windows import profile_from_args
+        profile_from_args(a)                                  # raises on an inconsistent override
+    if getattr(a, "primary_fpr", None) is not None and not (0 < a.primary_fpr < 1):
+        raise SystemExit("[depthctl] --primary-fpr must be in (0, 1)")
+
+
+# ------------------------------------------------------------------------------------------------
+# sbatch (agctl convention: render -> sbatch --test-only -> optional submit with afterok)
+# ------------------------------------------------------------------------------------------------
 def _q(xs) -> str:
     return " ".join(shlex.quote(str(x)) for x in xs)
 
 
+def _render(P: AGPaths, run: str, name: str, cmd: List[str], time_key: str, cpus: int = 8) -> Path:
+    import agctl
+    from agdepth.lineage import now_ts
+    R = P.run(run)
+    R.logs.mkdir(parents=True, exist_ok=True)                 # Slurm cannot open -o in a missing directory
+    R.slurm.mkdir(parents=True, exist_ok=True)
+    out = os.environ.get("AG_OUT") or str(P.root)
+    text = agctl.SBATCH_HEADER.format(name=name, partition=env("AG_PARTITION", "RTX6000ADA"), gres="gpu:1", cpus=cpus,
+                                      time=env(f"AG_TIME_{time_key.upper()}", TIME[time_key]), log_dir=str(R.logs),
+                                      array_line="", out=out, repo=agctl.REPO)
+    text += f'export AGDEPTH_OUT="{P.root}"\n"$PY" depthctl.py {_q(cmd)}\n'
+    path = R.slurm / f"{name}.{now_ts()}.sbatch"
+    path.write_text(text)
+    return path
+
+
+def _dispatch(steps: List[Tuple[str, Path, List[str]]], submit: bool) -> int:
+    """steps = [(name, script, dependency names)].  --test-only every script; with submit, submit in order."""
+    import agctl
+    for _, p, _ in steps:
+        print(f"[sbatch] rendered {p}")
+    if shutil.which("sbatch") is None:
+        print("[sbatch] sbatch not found here: scripts rendered only (sbatch --test-only skipped)")
+        return 0
+    ok = True
+    for name, p, _ in steps:
+        r = agctl._sbatch(["--test-only", str(p)])
+        print(f"[test-only] {name}: rc={r.returncode} {r.stdout.strip()} {r.stderr.strip()}")
+        ok &= r.returncode == 0
+    if not ok:
+        print("[sbatch] --test-only failed: nothing submitted", file=sys.stderr)
+        return 1
+    if not submit:
+        print("[sbatch] all scripts pass --test-only; add --submit to submit them")
+        return 0
+    jid: Dict[str, str] = {}
+    for name, p, deps in steps:
+        dj = [jid[d] for d in deps if d in jid]
+        r = agctl._sbatch(([f"--dependency=afterok:{':'.join(dj)}"] if dj else []) + [str(p)])
+        print(r.stdout.strip() or r.stderr.strip())
+        m = re.search(r"Submitted batch job (\d+)", r.stdout)
+        if r.returncode or not m:
+            print(f"[sbatch] submitting {name} failed; later steps not submitted", file=sys.stderr)
+            return 1
+        jid[name] = m.group(1)
+    print(f"[sbatch] submitted {jid}")
+    return 0
+
+
 # ------------------------------------------------------------------------------------------------
-# sub-commands
+# argument lists that reproduce a command inside a job
 # ------------------------------------------------------------------------------------------------
 def _build_args(a) -> List[str]:
     out = ["--run", a.run, "--profile", a.profile, "--split-mode", a.split_mode, "--tok", a.tok, "--bg-domains", a.bg_domains]
@@ -58,63 +146,15 @@ def _build_args(a) -> List[str]:
     return out
 
 
-def cmd_build(a):
-    if a.sbatch:
-        return _submit(f"ag_build_{a.run}", f"${{PY}} depthctl.py build {_q(_build_args(a))}", "build", a, cpu=True,
-                       mem="32G", cpus="4")
-    from agdepth.windows import build, profile_from_args
-    build(a.run, profile_from_args(a), a.split_mode, a.tok, [d for d in a.bg_domains.split(",") if d],
-          sources_only=[s for s in a.sources.split(",") if s] or None)
-
-
 def _bb_args(a, bb: str) -> List[str]:
-    return ["--run", a.run, "--backbone", bb, "--framings", a.framings, "--poolings", a.poolings]
-
-
-def cmd_pipeline(a, dep: Optional[str] = None):
-    """extract -> fit -> score for one backbone in one process (the model is loaded once)."""
-    bb = backbone(a.backbone)
-    if a.sbatch:
-        extra = (["--skip-score"] if a.skip_score else []) + (["--drop-feats"] if a.drop_feats else [])
-        return _submit(f"ag_{bb.key}_{a.run}", f"${{PY}} depthctl.py pipeline {_q(_bb_args(a, a.backbone) + extra)}",
-                       "pipeline", a, dep=dep, min_gpu_gb=bb.min_gpu_gb, mem="96G")
-    from agdepth import extract, fit, score
-    fr = [f for f in a.framings.split(",") if f]
-    po = [p for p in a.poolings.split(",") if p]
-    M = extract.load(bb.repo, a.device, a.dtype)
-    extract.extract(a.run, a.backbone, fr, po, M=M)
-    fit.fit(a.run, a.backbone, fr, po, device=a.device)
-    if not a.skip_score:
-        score.score(a.run, a.backbone, fr, po, M=M)
-    if a.drop_feats:
-        extract.drop_feats(a.run, a.backbone, fr, po)
-
-
-def cmd_extract(a):
-    bb = backbone(a.backbone)
-    if a.sbatch:
-        return _submit(f"ag_extract_{bb.key}_{a.run}", f"${{PY}} depthctl.py extract {_q(_bb_args(a, a.backbone))}",
-                       "pipeline", a, min_gpu_gb=bb.min_gpu_gb, mem="96G")
-    from agdepth import extract
-    extract.extract(a.run, a.backbone, a.framings.split(","), a.poolings.split(","), device=a.device, dtype=a.dtype)
-
-
-def cmd_fit(a):
-    bb = backbone(a.backbone)
-    if a.sbatch:
-        return _submit(f"ag_fit_{bb.key}_{a.run}", f"${{PY}} depthctl.py fit {_q(_bb_args(a, a.backbone))}", "pipeline", a,
-                       min_gpu_gb=24, mem="96G")
-    from agdepth import fit
-    fit.fit(a.run, a.backbone, a.framings.split(","), a.poolings.split(","), device=a.device)
-
-
-def cmd_score(a):
-    bb = backbone(a.backbone)
-    if a.sbatch:
-        return _submit(f"ag_score_{bb.key}_{a.run}", f"${{PY}} depthctl.py score {_q(_bb_args(a, a.backbone))}",
-                       "pipeline", a, min_gpu_gb=bb.min_gpu_gb, mem="64G")
-    from agdepth import score
-    score.score(a.run, a.backbone, a.framings.split(","), a.poolings.split(","), a.device, a.dtype)
+    out = ["--run", a.run, "--backbone", bb, "--framings", a.framings, "--poolings", a.poolings]
+    for k in ("device", "dtype"):
+        if getattr(a, k, None):
+            out += [f"--{k}", getattr(a, k)]
+    for k in ("skip_score", "drop_feats", "fresh"):
+        if getattr(a, k, False):
+            out.append("--" + k.replace("_", "-"))
+    return out
 
 
 def _analyze_args(a) -> List[str]:
@@ -126,66 +166,171 @@ def _analyze_args(a) -> List[str]:
     return out
 
 
-def cmd_analyze(a, dep: Optional[str] = None):
+# ------------------------------------------------------------------------------------------------
+# the backbone run: extract -> fit -> score (one process, the model is loaded once), with lineage
+# ------------------------------------------------------------------------------------------------
+def run_pipeline(P: AGPaths, run: str, bb_key: str, framings: Sequence[str], poolings: Sequence[str],
+                 device: Optional[str] = None, dtype: Optional[str] = None, skip_score: bool = False,
+                 drop_feats: bool = False, fresh: bool = False, budget: Optional[int] = None) -> None:
+    from agdepth import extract, fit, score
+    from agdepth import lineage as LN
+    from agdepth.analyze import exp_of_card
+    from agdepth.fit import probes_current
+    from agdepth.windows import load_card
+    R = P.run(run)
+    card = load_card(R)
+    dsha = card["data_manifest_sha"]
+    bb = backbone(bb_key)
+    run_dir = R.bb_run(bb.key)
+    if fresh:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        shutil.rmtree(R.root / "feats" / bb.key, ignore_errors=True)
+    prof = card["recipe"]["profile"]
+    seed = int(card["recipe"].get("seed", 0))
+    exp_id = exp_of_card(card)
+    M = extract.load(bb.repo, device, dtype)
+    # framings/poolings are outputs of one backbone run, not part of its identity (adding one resumes the same run)
+    cfg = {"data_manifest_sha": dsha, "backbone": bb.repo, "chat": bb.chat, "dtype": M["dtype"],
+           "max_len": prof["max_len"], "lambdas": list(LAMBDAS), "seeds": list(prof["seeds"]),
+           "train_subsample": TRAIN_SUBSAMPLE}
+    chash = LN.config_hash(cfg)
+    run_id, _ = LN.stable_run_id(run_dir, lambda: LN.make_run_id(exp_id, "probe", bb.key, f"depthwin-{prof['window']}",
+                                                                 chash, seed))
+    lin = LN.start(run_dir, run_id, exp_id, chash, seed=seed, producer="mock" if card.get("smoke") else "reference",
+                   model_sha={"backbone": LN.model_sha_of(bb.repo, M["sha"])}, data_manifest_sha=dsha,
+                   parents=[card.get("run_id", "")] if card.get("run_id") else [])
+    for fr in framings:
+        need_fit = not all(probes_current(R, bb.key, fr, p, dsha) for p in poolings)
+        if need_fit:
+            extract.extract(run, bb.key if bb.key in BACKBONES else bb.repo, [fr], poolings, device=device, dtype=dtype,
+                            budget=budget, P=P, M=M)
+            fit.fit(run, bb.key if bb.key in BACKBONES else bb.repo, [fr], poolings, device=device, P=P)
+        else:
+            print(f"[pipeline] {bb.key}/{fr}: probes are current for this dataset, extract + fit skipped")
+        if not skip_score:
+            score.score(run, bb.key if bb.key in BACKBONES else bb.repo, [fr], poolings, device, dtype, budget, P=P, M=M)
+        if drop_feats:
+            extract.drop_feats(run, bb.key if bb.key in BACKBONES else bb.repo, [fr], poolings, P=P)
+    fit.fit_lex(run, prof["seeds"], LAMBDAS, device, P)
+    steps = {"framings": sorted(set(framings)), "poolings": sorted(set(poolings)), "run_id": run_id}
+    (run_dir / "steps.json").write_text(json.dumps(steps, indent=2))
+    LN.finish(run_dir, lin)
+
+
+# ------------------------------------------------------------------------------------------------
+# sub-commands
+# ------------------------------------------------------------------------------------------------
+def cmd_build(a):
+    _validate(a)
+    P = AGPaths.load()
     if a.sbatch:
-        return _submit(f"ag_analyze_{a.run}", f"${{PY}} depthctl.py analyze {_q(_analyze_args(a))}", "analyze", a,
-                       dep=dep, cpu=True, mem="64G", cpus="8")
+        p = _render(P, a.run, f"agd-build-{a.run}", ["build"] + _build_args(a), "build", cpus=4)
+        return _dispatch([("build", p, [])], a.submit)
+    from agdepth.windows import build, profile_from_args
+    build(a.run, profile_from_args(a), a.split_mode, a.tok, [d for d in a.bg_domains.split(",") if d],
+          sources_only=[s for s in a.sources.split(",") if s] or None, P=P)
+
+
+def cmd_pipeline(a):
+    _validate(a)
+    P = AGPaths.load()
+    if a.sbatch:
+        bb = backbone(a.backbone)
+        p = _render(P, a.run, f"agd-{bb.key}-{a.run}", ["pipeline"] + _bb_args(a, a.backbone), "pipeline")
+        return _dispatch([(bb.key, p, [])], a.submit)
+    run_pipeline(P, a.run, a.backbone, a.framings.split(","), a.poolings.split(","), a.device, a.dtype, a.skip_score,
+                 a.drop_feats, a.fresh)
+
+
+def _single(step: str):
+    def cmd(a):
+        _validate(a)
+        P = AGPaths.load()
+        bb = backbone(a.backbone)
+        if a.sbatch:
+            p = _render(P, a.run, f"agd-{step}-{bb.key}-{a.run}", [step] + _bb_args(a, a.backbone), "pipeline")
+            return _dispatch([(step, p, [])], a.submit)
+        from agdepth import extract, fit, score
+        fr, po = a.framings.split(","), a.poolings.split(",")
+        if step == "extract":
+            extract.extract(a.run, a.backbone, fr, po, device=a.device, dtype=a.dtype, P=P)
+        elif step == "fit":
+            fit.fit(a.run, a.backbone, fr, po, device=a.device, P=P)
+        else:
+            score.score(a.run, a.backbone, fr, po, a.device, a.dtype, P=P)
+    return cmd
+
+
+def cmd_analyze(a):
+    _validate(a)
+    P = AGPaths.load()
+    if a.sbatch:
+        p = _render(P, a.run, f"agd-analyze-{a.run}", ["analyze"] + _analyze_args(a), "analyze")
+        return _dispatch([("analyze", p, [])], a.submit)
     from agdepth.analyze import analyze
-    analyze(a.run, a.primary_fpr, a.n_boot)
+    analyze(a.run, a.primary_fpr, a.n_boot, P=P)
 
 
 def cmd_run(a):
-    """build (optional) -> one GPU job per backbone -> analyze."""
-    bbs = {"e03": E03_BACKBONES, "e11": E11_BACKBONES}.get(a.backbones, [b for b in a.backbones.split(",") if b])
+    """build (optional) -> one job per backbone -> analyze."""
+    _validate(a)
+    P = AGPaths.load()
+    bbs = [x for x in a.backbones.split(",") if x]
     if not a.sbatch:
         if not a.skip_build:
             cmd_build(a)
         for bb in bbs:
-            a.backbone = bb
-            cmd_pipeline(a)
-        return cmd_analyze(a)
-    dep = None
+            run_pipeline(P, a.run, bb, a.framings.split(","), a.poolings.split(","), a.device, a.dtype, a.skip_score,
+                         a.drop_feats, a.fresh)
+        from agdepth.analyze import analyze
+        analyze(a.run, a.primary_fpr, a.n_boot, P=P)
+        return 0
+    steps: List[Tuple[str, Path, List[str]]] = []
     if not a.skip_build:
-        dep = cmd_build(a)
-    jids = []
+        steps.append(("build", _render(P, a.run, f"agd-build-{a.run}", ["build"] + _build_args(a), "build", cpus=4), []))
+    names = []
     for bb in bbs:
-        a.backbone = bb
-        jids.append(cmd_pipeline(a, dep=dep))
-    jids = [j for j in jids if j]
-    cmd_analyze(a, dep=":".join(jids) if jids else None)
+        key = backbone(bb).key
+        names.append(key)
+        steps.append((key, _render(P, a.run, f"agd-{key}-{a.run}", ["pipeline"] + _bb_args(a, bb), "pipeline"),
+                      ["build"] if not a.skip_build else []))
+    steps.append(("analyze", _render(P, a.run, f"agd-analyze-{a.run}", ["analyze"] + _analyze_args(a), "analyze"), names))
+    return _dispatch(steps, a.submit)
 
 
 def cmd_smoke(a):
-    """Offline end-to-end run: placeholder classes, tiny random model, CPU.  Checks the plumbing, not the claim."""
-    base = Path(a.dir) if a.dir else Path(tempfile.mkdtemp(prefix="agdepth_smoke_"))
-    os.environ["AG_OUT"] = str(base / "out")
-    from agdepth import analyze, extract, fit, score
+    """Offline end-to-end run: placeholder classes, tiny random model, CPU.  Checks the plumbing, not the claim.
+    Nothing outside --dir (default: a new temp dir) is touched, and the process environment is left alone."""
+    from agdepth.analyze import analyze
+    from agdepth.config import PROFILES as PR
     from agdepth.tiny import make_tiny_repo
     from agdepth.windows import build
+    base = Path(a.dir).expanduser().resolve() if a.dir else Path(tempfile.mkdtemp(prefix="agdepth_smoke_"))
+    P = AGPaths.load(root=base / "out")
+    shutil.rmtree(P.run("smoke").root, ignore_errors=True)     # only the smoke run's own directory
     repo = str(make_tiny_repo(base / "tiny-model"))
-    build("smoke", PROFILES["smoke"], smoke=True)
-    M = extract.load(repo, "cpu", "fp32")
-    fr, po = ["raw", "task"], ["mean", "last", "span"]
-    extract.extract("smoke", repo, fr, po, M=M, budget=4096)
-    fit.fit("smoke", repo, fr, po, device="cpu")
-    score.score("smoke", repo, fr, po, M=M, budget=4096)
-    s = analyze.analyze("smoke", n_boot=a.n_boot if a.n_boot is not None else 20)
-    print(f"[smoke] OK -> {AGPaths.load().run('smoke').report / 'report.md'}")
+    build("smoke", PR["smoke"], smoke=True, P=P)
+    run_pipeline(P, "smoke", repo, ["raw", "task"], ["mean", "last", "span"], device="cpu", dtype="fp32", budget=4096)
+    s = analyze("smoke", primary_fpr=a.primary_fpr, n_boot=a.n_boot if a.n_boot is not None else 20, P=P)
+    print(f"[smoke] OK -> {P.run('smoke').report / 'report.md'}")
     return s
 
 
 def cmd_doctor(a):
     from agdepth.sources import registry_files
     P = AGPaths.load()
-    print(f"AG_OUT       {P.root}")
+    print(f"output root  {P.root}   (AGDEPTH_OUT > $AG_OUT/poc/agdepth > $LG_OUT/agdepth)")
     print(f"LG_SOURCES   {P.sources}")
     print(f"LG_DATA_V2   {P.data_v2}")
     print(f"HF_HOME      {P.hf_home}")
+    ag_env = ROOT / "env" / "ag.env"
+    print(f"jobs         source slurm/ag_common.sh -> {ag_env} ({'present' if ag_env.exists() else 'MISSING: cp env/ag.env.example env/ag.env'})"
+          f", venv {env('AG_VENV', '/home/212aig08/ag_venv/ag311')}")
     try:
         import torch
         import transformers
-        print(f"python       {sys.executable}  torch {torch.__version__} (cuda={torch.cuda.is_available()})  "
-              f"transformers {transformers.__version__}")
+        print(f"python       {sys.executable} {sys.version.split()[0]}  torch {torch.__version__} "
+              f"(cuda={torch.cuda.is_available()})  transformers {transformers.__version__}")
     except Exception as e:
         print(f"python       {sys.executable}  torch/transformers MISSING ({e})")
     try:
@@ -198,12 +343,15 @@ def cmd_doctor(a):
     for dom in BG_DOMAINS:
         h = P.data_v2 / "haystack" / dom / "docs.jsonl.gz"
         s = P.sources / dom / "docs.jsonl.gz"
-        print(f"background {dom:10s} {'haystack' if h.exists() else ('stream' if s.exists() else 'MISSING')}")
+        keep = (P.data_v2 / "screen" / f"keep_{dom}.json").exists()
+        state = "haystack" + ("" if keep else " (UNSCREENED)") if h.exists() else ("stream (UNSCREENED)" if s.exists() else "MISSING")
+        print(f"background {dom:10s} {state}")
     print()
     for src in SNIP_SOURCES:
         if src.kind == "registry":
             files = registry_files(src, P)
-            print(f"source {src.name:12s} {src.cls:9s} {'OK (%d files)' % len(files) if files else 'MISSING -> python depthctl.py download --only ' + src.registry}")
+            print(f"source {src.name:12s} {src.cls:9s} "
+                  f"{'OK (%d files)' % len(files) if files else 'MISSING -> python depthctl.py download --only ' + src.registry}")
         else:
             print(f"source {src.name:12s} {src.cls:9s} {src.kind}")
     print()
@@ -218,7 +366,10 @@ def cmd_download(a):
     from agdepth.download import run
     r = run(only=[x for x in a.only.split(",") if x] or None, with_s1=a.with_s1, token=a.token,
             force_online=a.force_online, skip_existing=not a.no_skip)
-    return 0 if not r.get("error") and not r.get("failed") else 1
+    rc = 0 if not r.get("error") and not r.get("failed") else 1
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)                       # streaming datasets threads can hang at interpreter exit (as in lgs1.download)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -228,9 +379,9 @@ def main(argv=None) -> int:
 
     def common(p, run=True):
         if run:
-            p.add_argument("--run", required=True, help="run name (directory under $AG_OUT)")
-        p.add_argument("--sbatch", action="store_true", help="submit to Slurm instead of running here")
-        p.add_argument("--dry-run", action="store_true", help="with --sbatch: write the script, do not submit")
+            p.add_argument("--run", required=True, help="run name (directory under the output root)")
+        p.add_argument("--sbatch", action="store_true", help="render sbatch script(s) and run sbatch --test-only")
+        p.add_argument("--submit", action="store_true", help="with --sbatch: submit after every --test-only passes")
 
     def data_opts(p):
         p.add_argument("--profile", default="quick", choices=sorted(PROFILES))
@@ -251,9 +402,11 @@ def main(argv=None) -> int:
         p.add_argument("--skip-score", action="store_true", help="pipeline: skip the big negative pool")
         p.add_argument("--drop-feats", action="store_true",
                        help="pipeline: delete the feature memmaps after fit/score (probes + scores are kept)")
+        p.add_argument("--fresh", action="store_true",
+                       help="pipeline: delete this backbone's run (features, probes, lineage) and start a new run id")
 
     def analyze_opts(p):
-        p.add_argument("--primary-fpr", type=float, default=None)
+        p.add_argument("--primary-fpr", type=float, default=None, help="override the plan's 2e-4 (reported as such)")
         p.add_argument("--n-boot", type=int, default=None)
 
     p = sub.add_parser("doctor"); p.set_defaults(fn=cmd_doctor)
@@ -262,15 +415,18 @@ def main(argv=None) -> int:
     p.add_argument("--token", default=None); p.add_argument("--force-online", action="store_true")
     p.add_argument("--no-skip", action="store_true")
     p = sub.add_parser("smoke"); p.set_defaults(fn=cmd_smoke)
-    p.add_argument("--dir", default=None); p.add_argument("--n-boot", type=int, default=None)
+    p.add_argument("--dir", default=None); analyze_opts(p)
     p = sub.add_parser("build"); common(p); data_opts(p); p.set_defaults(fn=cmd_build)
-    for name, fn in (("extract", cmd_extract), ("fit", cmd_fit), ("score", cmd_score), ("pipeline", cmd_pipeline)):
-        p = sub.add_parser(name); common(p); model_opts(p); p.set_defaults(fn=fn)
+    p = sub.add_parser("pipeline"); common(p); model_opts(p); p.set_defaults(fn=cmd_pipeline)
+    for name in ("extract", "fit", "score"):
+        p = sub.add_parser(name); common(p); model_opts(p); p.set_defaults(fn=_single(name))
     p = sub.add_parser("analyze"); common(p); analyze_opts(p); p.set_defaults(fn=cmd_analyze)
     p = sub.add_parser("run"); common(p); data_opts(p); model_opts(p, bb=False); analyze_opts(p); p.set_defaults(fn=cmd_run)
-    p.add_argument("--backbones", default="e03", help="e03 | e11 | comma list of backbone keys")
+    p.add_argument("--backbones", default="e03", help="e03 | e11 | comma list of backbone keys (aliases expand)")
     p.add_argument("--skip-build", action="store_true", help="reuse the existing windows of this run")
     a = ap.parse_args(argv)
+    if getattr(a, "submit", False) and not getattr(a, "sbatch", False):
+        ap.error("--submit needs --sbatch")
     r = a.fn(a)
     return r if isinstance(r, int) else 0
 

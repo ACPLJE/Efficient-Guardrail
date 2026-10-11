@@ -4,6 +4,9 @@ $LG_SOURCES/<name>/revision.json {name, kind, repo_id|urls, sha, local_path, sta
     python depthctl.py download                    # BIPIA, NotInject, deepset, LLMail-Inject, Gandalf, 2 backbones
     python depthctl.py download --only bipia,notinject
     python depthctl.py download --with-s1          # + the S1 entries the PoC reads when LG v2 data is not built
+
+Run it on the login node under nohup (large models): `nohup python depthctl.py download > dl.log 2>&1 &`.
+xet is turned off (HF_HUB_DISABLE_XET=1) as in slurm/s1_download_login.sh: a stalled xet transfer cannot resume.
 """
 from __future__ import annotations
 
@@ -20,17 +23,20 @@ from .config import DOWNLOADS, S1_DEPENDENCIES, AGPaths, Download
 
 
 def fetch_urls(d: Download, dst: Path) -> Dict:
-    dst.mkdir(parents=True, exist_ok=True)
-    h = hashlib.sha256()
-    n, total = 0, 0
+    """All or nothing: every URL is read into memory first, files are written only after all of them arrived."""
+    blobs = []
     for url in d.urls:
         with urllib.request.urlopen(url, timeout=120) as r:
-            data = r.read()
-        (dst / Path(url).name).write_bytes(data)
+            blobs.append((Path(url).name, r.read()))
+    dst.mkdir(parents=True, exist_ok=True)
+    h = hashlib.sha256()
+    for name, data in blobs:
+        tmp = dst / f".{name}.tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, dst / name)
         h.update(data)
-        n += 1
-        total += len(data)
-    return {"sha": h.hexdigest(), "local_path": str(dst), "n_files": n, "bytes": total, "urls": list(d.urls)}
+    return {"sha": h.hexdigest(), "local_path": str(dst), "n_files": len(blobs), "bytes": sum(len(b) for _, b in blobs),
+            "urls": list(d.urls)}
 
 
 def run(only: Optional[List[str]] = None, with_s1: bool = False, token: Optional[str] = None,
@@ -43,6 +49,7 @@ def run(only: Optional[List[str]] = None, with_s1: bool = False, token: Optional
     os.environ.pop("HF_DATASETS_OFFLINE", None)
     os.environ["HF_HOME"] = str(P.hf_home)
     os.environ.setdefault("HF_HUB_CACHE", str(P.hf_home / "hub"))
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")         # set before huggingface_hub is imported
     if not force_online and not D1._online_ok():
         print(f"[download] no network from {socket.gethostname()}: run on the login node, never inside sbatch",
               file=sys.stderr)
@@ -79,8 +86,13 @@ def run(only: Optional[List[str]] = None, with_s1: bool = False, token: Optional
         D1._write_rev(dst, rec)
         status[d.name] = rec["status"]
     if with_s1:
-        D1.run(only=S1_DEPENDENCIES, token=token, force_online=force_online)
+        r1 = D1.run(only=S1_DEPENDENCIES, skip_existing=skip_existing, token=token, force_online=force_online)
+        s1 = D1.rebuild_status(P.sources)
+        for name in S1_DEPENDENCIES:                           # only the entries this call asked for
+            status[f"s1:{name}"] = (s1.get(name) or {}).get("status", "missing")
+        if r1.get("error"):
+            status["s1"] = r1["error"]
     D1.rebuild_status(P.sources)
-    failed = [k for k, v in status.items() if v != "ok"]
+    failed = [k for k, v in status.items() if v not in ("ok", "manual")]
     print(f"[download] ok={len(status) - len(failed)} failed={len(failed)} {failed if failed else ''}")
     return {"status": status, "failed": failed}

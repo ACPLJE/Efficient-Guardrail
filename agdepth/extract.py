@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -53,6 +54,7 @@ TASK_PROMPTS = [
 ]
 SHARD = 1024
 FP16_MAX = 65000.0
+RESUME_KEYS = ("n", "layers", "d", "data_manifest_sha", "repo", "model_sha", "max_len", "dtype_model", "chat")
 _WARNED: Dict[str, bool] = {}
 
 
@@ -75,9 +77,62 @@ def _enc(tok, text: str, split_special: bool = False) -> Tuple[List[int], List[T
     return list(e["input_ids"]), [tuple(x) for x in e["offset_mapping"]]
 
 
-def _render_task(tok, window_text: str, wid: str) -> Tuple[str, str]:
+def _added_strings(tok) -> List[str]:
+    """Every added-token string of the tokenizer (special or not), longest first; cached on the tokenizer."""
+    cached = getattr(tok, "_agdepth_added", None)
+    if cached is None:
+        try:
+            vocab = tok.get_added_vocab()
+        except Exception:
+            vocab = {}
+        cached = sorted((t for t in vocab if len(t) > 1), key=len, reverse=True)
+        try:
+            tok._agdepth_added = cached
+        except Exception:
+            pass
+    return cached
+
+
+def _enc_doc(tok, text: str) -> Tuple[List[int], List[Tuple[int, int]]]:
+    """Tokenize untrusted document text with every added-token string kept as plain text.  split_special_tokens covers
+    special tokens only; Qwen3's non-special added tokens (<think>, <tool_call>, ...) would otherwise become control
+    ids on one backbone family and sub-words on another.  Each occurrence is cut after its first character, so no added
+    token can match, and the pieces are encoded separately with their offsets shifted back."""
+    found = [t for t in _added_strings(tok) if t in text]
+    if not found:
+        return _enc(tok, text, split_special=True)
+    pat = re.compile("|".join(re.escape(t) for t in found))
+    ids: List[int] = []
+    offs: List[Tuple[int, int]] = []
+
+    def piece(a: int, b: int) -> None:
+        if a < b:
+            i, o = _enc(tok, text[a:b], split_special=True)
+            ids.extend(i)
+            offs.extend((x + a, y + a) for x, y in o)
+    pos = 0
+    for m in pat.finditer(text):
+        piece(pos, m.start())
+        piece(m.start(), m.start() + 1)
+        piece(m.start() + 1, m.end())
+        pos = m.end()
+    piece(pos, len(text))
+    return ids, offs
+
+
+NEUTRAL_TURNS = {   # a plain user turn of the model family (guards: their own template is a moderation prompt)
+    "chatml": ("<|im_start|>user\n", "<|im_end|>\n<|im_start|>assistant\n"),
+    "llama3": ("<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n",
+               "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"),
+}
+
+
+def _render_task(tok, window_text: str, wid: str, chat: str = "tokenizer") -> Tuple[str, str]:
     content_head = f"{task_of(wid)}\n\n<document>\n"
     content = content_head + window_text + "\n</document>"
+    if chat in NEUTRAL_TURNS:
+        head, tail = NEUTRAL_TURNS[chat]
+        return head + content_head, "\n</document>" + tail
     msgs = [{"role": "user", "content": content}]
     prompt = None
     if getattr(tok, "chat_template", None):
@@ -96,21 +151,23 @@ def _render_task(tok, window_text: str, wid: str) -> Tuple[str, str]:
     return prompt[:i], prompt[i + len(window_text):]
 
 
-def encode(tok, row: Dict, framing: str, max_len: int) -> Dict:
+def encode(tok, row: Dict, framing: str, max_len: int, chat: str = "tokenizer") -> Dict:
     """ids + boolean masks (window tokens, snippet tokens) + index of the last-pooling token."""
     text = row["text"]
     a, b = row["snip_span"]
     if framing == "raw":
-        ids, offs = _enc(tok, text, split_special=True)
+        ids, offs = _enc_doc(tok, text)
         ids, offs = ids[:max_len], offs[:max_len]
         win = np.ones(len(ids), dtype=bool)
         win[0] = False                                         # position 0 = attention sink, excluded from mean
         span = np.array([(e > a and s < b) for s, e in offs], dtype=bool)
+        if span[1:].any():
+            span[0] = False                                    # ... and from the snippet mean
         last = len(ids) - 1
     elif framing == "task":
-        pre, suf = _render_task(tok, text, row["id"])
+        pre, suf = _render_task(tok, text, row["id"], chat)
         p_ids, _ = _enc(tok, pre)
-        w_ids, w_offs = _enc(tok, text, split_special=True)
+        w_ids, w_offs = _enc_doc(tok, text)
         s_ids, _ = _enc(tok, suf)
         ids = p_ids + w_ids + s_ids
         win = np.zeros(len(ids), dtype=bool)
@@ -198,9 +255,10 @@ def iter_pooled(M: Dict, rows: Sequence[Dict], framing: str, poolings: Sequence[
                 budget: int, encs: Optional[List[Dict]] = None) -> Iterator[Tuple[List[int], Dict[str, np.ndarray]]]:
     """Yield (row indices, pooled features) over `rows`, length-sorted batches, halving the batch budget on OOM."""
     import torch
-    encs = encs if encs is not None else [encode(M["tok"], r, framing, max_len) for r in rows]
+    encs = encs if encs is not None else [encode(M["tok"], r, framing, max_len, M.get("chat", "tokenizer")) for r in rows]
+    M["budget"] = min(M.get("budget") or budget, budget)       # a budget halved on OOM stays halved for the run
     order = sorted(range(len(rows)), key=lambda i: len(encs[i]["ids"]))
-    pending = list(_batches(encs, order, budget))
+    pending = list(_batches(encs, order, M["budget"]))
     while pending:
         idx = pending.pop(0)
         try:
@@ -209,10 +267,12 @@ def iter_pooled(M: Dict, rows: Sequence[Dict], framing: str, poolings: Sequence[
             torch.cuda.empty_cache()
             if len(idx) == 1:
                 raise
-            h = len(idx) // 2
-            print(f"[extract] OOM at batch {len(idx)} x {max(len(encs[i]['ids']) for i in idx)} tokens -> split",
-                  file=sys.stderr, flush=True)
-            pending[:0] = [idx[:h], idx[h:]]
+            M["budget"] = max(1, M["budget"] // 2)
+            print(f"[extract] OOM at batch {len(idx)} x {max(len(encs[i]['ids']) for i in idx)} tokens -> "
+                  f"budget {M['budget']} tokens for the rest of the run", file=sys.stderr, flush=True)
+            h = len(idx) // 2                                  # the failed batch is always split (progress) ...
+            rest = [i for b in pending for i in b]             # ... and the rest re-packed with the halved budget
+            pending = [idx[:h], idx[h:]] + list(_batches(encs, rest, M["budget"]))
 
 
 # ----------------------------------------------------------------------------------------------
@@ -227,15 +287,16 @@ def _versions() -> Dict[str, str]:
 def extract(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: Sequence[str] = DEFAULT_POOLINGS,
             max_len: Optional[int] = None, device: Optional[str] = None, dtype: Optional[str] = None,
             budget: Optional[int] = None, P: Optional[AGPaths] = None, M: Optional[Dict] = None) -> Dict:
-    from .windows import read_jsonl_gz
+    from .windows import load_card, read_jsonl_gz
     P = P or AGPaths.load()
     R = P.run(run)
-    card = json.loads(R.datacard.read_text())
+    card = load_card(R)
     prof = card["recipe"]["profile"]
     max_len = max_len or int(prof["max_len"])
     rows = read_jsonl_gz(R.windows)
     bb = backbone(bb_key)
     M = M or load(bb.repo, device, dtype)
+    M["chat"] = bb.chat
     budget = budget or bb.tokens_per_batch
     L1, d, N = M["n_layers"] + 1, M["d"], len(rows)
     summary = {}
@@ -244,16 +305,25 @@ def extract(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings:
         D.mkdir(parents=True, exist_ok=True)
         meta_p, prog_p = D / "meta.json", D / "progress.json"
         meta = {"backbone": bb.key, "repo": bb.repo, "model_sha": M["sha"], "framing": framing, "poolings": list(poolings),
+                "chat": bb.chat if framing == "task" else "none",
                 "n": N, "n_layers": M["n_layers"], "layers": L1, "d": d, "dtype_model": M["dtype"], "store": "float16",
                 "layout": "[layer, window, d]", "max_len": max_len, "recipe_hash": card["recipe_hash"],
-                "versions": _versions(), "complete": False}
+                "data_manifest_sha": card["data_manifest_sha"], "versions": _versions(), "complete": False}
         old = json.loads(meta_p.read_text()) if meta_p.exists() else None
-        resume = bool(old) and all(old.get(k) == meta[k] for k in ("n", "layers", "d", "recipe_hash", "repo")) \
+        diff = [k for k in RESUME_KEYS if old and old.get(k) != meta[k]]
+        files_ok = bool(old) and all((D / f"{p}.f16").exists() for p in old.get("poolings", []))
+        resume = bool(old) and not diff and files_ok and not old.get("dropped") \
             and set(poolings) <= set(old.get("poolings", []))
         if resume and old.get("complete"):
             print(f"[extract] {bb.key}/{framing}: complete, skipping ({D})")
             summary[framing] = old
             continue
+        if old and not resume:
+            why = f"changed {diff}" if diff else ("files dropped" if (old.get("dropped") or not files_ok)
+                                                  else "new poolings")
+            print(f"[extract] {bb.key}/{framing}: starting over ({why})", flush=True)
+            prog_p.unlink(missing_ok=True)                    # a fresh start never inherits shard progress
+            (D / "aux.npz").unlink(missing_ok=True)
         done = set(json.loads(prog_p.read_text())["done"]) if resume and prog_p.exists() else set()
         if resume:
             meta["poolings"] = old["poolings"]
@@ -271,7 +341,7 @@ def extract(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings:
             if si in done:
                 continue
             sub = [rows[i] for i in shard]
-            encs = [encode(M["tok"], r, framing, max_len) for r in sub]
+            encs = [encode(M["tok"], r, framing, max_len, M["chat"]) for r in sub]
             for loc, feats in iter_pooled(M, sub, framing, meta["poolings"], max_len, budget, encs):
                 gidx = np.asarray([shard[j] for j in loc])
                 for p, x in feats.items():

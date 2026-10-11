@@ -1,9 +1,10 @@
 # lg_s1 — Landmark Guard 계획서 단계 S1 실행 패키지
 
-> **깊이 비대칭 PoC (2026-10-11, 브랜치 `claude/practical-clarke-pbd1dv`)**: 같은 backbone에서 유해 콘텐츠는 얕은 층에서,
-> injection은 지시문이 많은 정상 텍스트 대비 깊은 층에서야 갈린다는 주장(비대칭 가드 계획서 E0.3 / E1.1)을 재는 코드는
-> `agdepth/` + `depthctl.py`이고, 실행 안내는 [`docs/depth_poc_runbook.md`](docs/depth_poc_runbook.md)다.
-> `python depthctl.py smoke` → `python depthctl.py download` (로그인 노드) → `python depthctl.py run --run e03 --sbatch`.
+> **깊이 비대칭 PoC (agdepth, 2026-10-11)**: 같은 backbone에서 유해 콘텐츠는 얕은 층에서, injection은 지시문이 많은
+> 정상 텍스트 대비 깊은 층에서야 갈린다는 주장(비대칭 가드 계획서 E0.3 / E1.1)을 재는 PoC 코드는 `agdepth/` + `depthctl.py`이고,
+> 실행 안내는 [`docs/depth_poc_runbook.md`](docs/depth_poc_runbook.md)다. 구축 계획 S2b 구현 전의 PoC이며 결정이 필요한 항목은
+> `docs/DECISIONS.md` D-041에 있다. `python depthctl.py smoke` → `python depthctl.py download`(로그인 노드) →
+> `python depthctl.py run --run e03 --sbatch --submit`.
 
 계획서 §2의 **S1(검증 장치·자산 정리·다운로드)** 8개 작업을 끝내는 코드입니다. 날짜와 무관하게 아래 순서대로 돌리면 S1의 산출물이 전부 `$LG_OUT`에 생깁니다.
 

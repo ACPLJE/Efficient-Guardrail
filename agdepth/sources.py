@@ -65,16 +65,21 @@ def _read_rows(path: Path) -> List[Dict]:
 
 
 def registry_files(src: SnipSource, P: AGPaths) -> List[Path]:
+    """Files of a registry source.  A $LG_SOURCES/<registry> directory whose revision.json does not say status "ok" (a
+    failed or partial download) is ignored, so a third of NotInject never passes for all of it."""
     roots: List[Path] = []
     rev = P.sources / src.registry / "revision.json"
+    rev_ok = True
     if rev.exists():
         try:
-            lp = json.loads(rev.read_text()).get("local_path")
-            if lp and Path(lp).exists():
+            r = json.loads(rev.read_text())
+            rev_ok = r.get("status") == "ok"
+            lp = r.get("local_path")
+            if rev_ok and lp and Path(lp).exists():
                 roots.append(Path(lp))
         except Exception:
-            pass
-    if (P.sources / src.registry).is_dir():
+            rev_ok = False
+    if rev_ok and (P.sources / src.registry).is_dir():
         roots.append(P.sources / src.registry)
     if src.hf_repo:
         hub = _hub_cache_dir(src.hf_repo)
@@ -221,10 +226,20 @@ def _iter_jsonl_gz(path: Path) -> Iterator[Dict]:
                 yield json.loads(line)
 
 
+def load_keep(P: AGPaths, domain: str) -> Optional[set]:
+    """LG v2 screening result (lgs2.screen.load_keep semantics): kept piece ids, or None when not completely screened."""
+    f = P.data_v2 / "screen" / f"keep_{domain}.json"
+    if not f.exists():
+        return None
+    d = json.loads(f.read_text())
+    return set(d.get("keep", [])) if d.get("complete", False) else None
+
+
 def load_backgrounds(P: AGPaths, domains: Sequence[str], max_docs: int = 4000, max_chars: int = 60000,
                      seed: int = 0) -> Tuple[List[Dict], Dict[str, str]]:
-    """[{id, domain, text}] per domain: LG v2 haystack pieces first, then S1 streamed docs.  Domains without data are
-    skipped (reported in the second return value)."""
+    """[{id, doc, domain, text}] per domain: LG v2 haystack pieces first, then S1 streamed docs.  `doc` is the SOURCE
+    document (pieces of one book share it) and is the split unit.  Haystack pieces rejected by the LG v2 safety screen
+    (screen/keep_<domain>.json) are dropped; unscreened domains are reported.  Missing domains are skipped."""
     rng = random.Random(seed)
     docs: List[Dict] = []
     where: Dict[str, str] = {}
@@ -239,22 +254,31 @@ def load_backgrounds(P: AGPaths, domains: Sequence[str], max_docs: int = 4000, m
             where[dom] = "missing"
             continue
         path, kind = got
-        recs = []
+        keep = load_keep(P, dom) if kind == "haystack" else None
+        recs, n_dropped = [], 0
         for i, r in enumerate(_iter_jsonl_gz(path)):
+            did = r.get("id") or f"{dom}-{i}"
             if kind == "haystack":
+                if keep is not None and did not in keep:
+                    n_dropped += 1
+                    continue
                 text = (r.get("sep") or "\n\n").join(r.get("pars") or [])
-                did = r.get("id") or f"{dom}-{i}"
+                src_doc = r.get("source_id") or did
             else:
                 text = r.get("text") or ""
-                did = r.get("id") or f"{dom}-{i}"
+                src_doc = did
             if len(text) < 2000:
                 continue
-            recs.append({"id": f"{dom}:{did}", "domain": dom, "text": text[:max_chars]})
+            recs.append({"id": f"{dom}:{did}", "doc": f"{dom}:{src_doc}", "domain": dom, "text": text[:max_chars]})
             if len(recs) >= max_docs * 3:
                 break
         rng.shuffle(recs)
         docs += recs[:max_docs]
-        where[dom] = f"{kind}:{path} ({min(len(recs), max_docs)} docs)"
+        screened = "screened" if keep is not None else "UNSCREENED"
+        where[dom] = f"{kind}:{path} ({min(len(recs), max_docs)} docs, {screened}, {n_dropped} rejected by the screen)"
+        if keep is None:
+            _log(f"background {dom}: no complete LG v2 screen (keep_{dom}.json); unsafe passages may act as hard "
+                 f"negatives for the harm task")
     return docs, where
 
 
@@ -302,12 +326,25 @@ def _texty(par: str) -> bool:
     return letters / max(1, len(par)) > 0.70 and par.count("{") + par.count(";") < 4
 
 
+def is_instruction_heavy(par: str) -> bool:
+    """Mining rule for `instr`: >= 2 imperative sentences making up >= 40 % of the sentences."""
+    n_imp, n_s = imperative_count(par)
+    return n_imp >= 2 and n_imp / max(1, n_s) >= 0.4
+
+
+def is_plain(par: str) -> bool:
+    """Mining rule for `plain`: no imperative sentence, >= 2 sentences, no question."""
+    n_imp, n_s = imperative_count(par)
+    return n_imp == 0 and n_s >= 2 and "?" not in par
+
+
 def mine_paragraphs(docs: Sequence[Dict], doc_split: Dict[str, str], max_per_doc: int = 4,
                     seed: int = 0) -> Tuple[List[Dict], List[Dict]]:
-    """(instr, plain) snippet candidates; each inherits the split of its source document (group = document)."""
+    """(instr, plain) snippet candidates; each inherits the split of its SOURCE document (group = source document)."""
     rng = random.Random(seed)
     instr, plain = [], []
     for d in docs:
+        doc = d.get("doc", d["id"])
         pars = [p.strip() for p in split_paragraphs(d["text"], "blank") if p.strip()]
         rng.shuffle(pars)
         ni = npl = 0
@@ -315,12 +352,12 @@ def mine_paragraphs(docs: Sequence[Dict], doc_split: Dict[str, str], max_per_doc
             if not _texty(p):
                 continue
             n_imp, n_s = imperative_count(p)
-            rec = {"source_id": f"{d['id']}#{k}", "text": p, "group": f"doc:{d['id']}", "split": doc_split.get(d["id"]),
+            rec = {"source_id": f"{d['id']}#{k}", "text": p, "group": f"doc:{doc}", "split": doc_split.get(doc),
                    "meta": {"domain": d["domain"], "n_imperative": n_imp, "n_sentences": n_s}}
-            if n_imp >= 2 and n_imp / max(1, n_s) >= 0.4 and ni < max_per_doc:
+            if is_instruction_heavy(p) and ni < max_per_doc:
                 instr.append(rec)
                 ni += 1
-            elif n_imp == 0 and n_s >= 2 and "?" not in p and npl < max_per_doc:
+            elif is_plain(p) and npl < max_per_doc:
                 plain.append(rec)
                 npl += 1
     return instr, plain
@@ -329,7 +366,7 @@ def mine_paragraphs(docs: Sequence[Dict], doc_split: Dict[str, str], max_per_doc
 # ----------------------------------------------------------------------------------------------
 # assemble every class
 # ----------------------------------------------------------------------------------------------
-def _dedup_group(items: List[Dict], source: str, cls: str, holdout: bool) -> List[Dict]:
+def _dedup_group(items: List[Dict], source: str, cls: str, holdout: bool, test_only: bool = False) -> List[Dict]:
     seen, uniq = set(), []
     for it in items:
         k = exact_key(it["text"])
@@ -343,7 +380,8 @@ def _dedup_group(items: List[Dict], source: str, cls: str, holdout: bool) -> Lis
         for i, g in zip(need, gids):
             uniq[i]["group"] = f"{source}:{g}"
     return [{"sid": f"{source}:{it['source_id']}", "text": it["text"], "cls": cls, "source": source,
-             "group": it["group"], "holdout": bool(it.get("holdout", holdout)), "split": it.get("split"),
+             "group": it["group"], "holdout": bool(it.get("holdout", holdout)), "test_only": bool(test_only),
+             "split": it.get("split"),
              "meta": it.get("meta", {})} for it in uniq]
 
 
@@ -391,7 +429,7 @@ def collect_snippets(P: AGPaths, docs: Sequence[Dict], doc_split: Dict[str, str]
             if src.max_items and len(items) > src.max_items:
                 rng = random.Random(f"{seed}-{src.name}")
                 items = rng.sample(items, src.max_items)
-            recs = _dedup_group(items, src.name, src.cls, src.holdout)
+            recs = _dedup_group(items, src.name, src.cls, src.holdout, src.test_only)
             by_cls[src.cls] += recs
             report[src.name] = {"status": "ok" if recs else "empty", "cls": src.cls, "n": len(recs), "where": where,
                                 "n_groups": len({r["group"] for r in recs})}

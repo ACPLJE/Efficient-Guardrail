@@ -28,17 +28,20 @@ def score(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: S
           P: Optional[AGPaths] = None, M: Optional[Dict] = None) -> None:
     import torch
     from .extract import iter_pooled, load
-    from .windows import read_jsonl_gz
+    from .fit import stored_sha
+    from .windows import load_card, read_jsonl_gz
     P = P or AGPaths.load()
     R = P.run(run)
     if not R.bigneg.exists():
         print(f"[score] {R.bigneg} not built (profile without bigneg): nothing to do")
         return
-    card = json.loads(R.datacard.read_text())
+    card = load_card(R)
+    dsha = card["data_manifest_sha"]
     max_len = int(card["recipe"]["profile"]["max_len"])
     rows = read_jsonl_gz(R.bigneg)
     bb = backbone(bb_key)
     M = M or load(bb.repo, device, dtype)
+    M["chat"] = bb.chat
     budget = budget or bb.tokens_per_batch
     dev = M["device"]
     N = len(rows)
@@ -49,6 +52,8 @@ def score(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: S
             f = D / f"{p}.probes.npz"
             if not f.exists():
                 raise SystemExit(f"{f} missing: run fit first")
+            if stored_sha(f) != dsha:
+                raise SystemExit(f"{f} was fit on another dataset than {R.windows}: re-run extract + fit")
             z = np.load(f)
             probes[p] = {k: torch.from_numpy(z[k].astype(np.float32)).to(dev) for k in ("W", "b", "mu", "sd")}
         T, S, L1, d = probes[poolings[0]]["W"].shape
@@ -57,7 +62,8 @@ def score(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: S
             out_p, prog_p = D / f"{p}.bigneg_scores.f32", D / f"{p}.bigneg_progress.json"
             psha[p] = hashlib.sha1((D / f"{p}.probes.npz").read_bytes()).hexdigest()[:16]
             prog = json.loads(prog_p.read_text()) if prog_p.exists() else {}
-            ok = prog.get("n") == N and prog.get("probes_sha") == psha[p] and out_p.exists()   # re-fit probes -> rescore
+            ok = (prog.get("n") == N and prog.get("probes_sha") == psha[p] and prog.get("data_manifest_sha") == dsha
+                  and out_p.exists())                       # re-fit probes or rebuilt data -> rescore
             mms[p] = np.memmap(out_p, dtype=np.float32, mode="r+" if ok else "w+", shape=(N, T, S, L1))
             done[p] = set(prog.get("done", [])) if ok else set()
         (D / "bigneg_ids.json").write_text(json.dumps([r["id"] for r in rows]))
@@ -77,22 +83,12 @@ def score(run: str, bb_key: str, framings: Sequence[str] = ("raw",), poolings: S
             for p in poolings:
                 mms[p].flush()
                 done[p].add(si)
-                (D / f"{p}.bigneg_progress.json").write_text(json.dumps({"n": N, "probes_sha": psha[p], "done": sorted(done[p]),
-                                                                         "complete": len(done[p]) == len(shards)}))
+                (D / f"{p}.bigneg_progress.json").write_text(json.dumps(
+                    {"n": N, "probes_sha": psha[p], "data_manifest_sha": dsha, "done": sorted(done[p]),
+                     "complete": len(done[p]) == len(shards)}))
             rate = sum(len(shards[j]) for j in todo[:k + 1]) / max(1e-6, time.time() - t0)
             print(f"[score] {bb.key}/{framing} shard {si + 1}/{len(shards)}  {rate:.1f} windows/s", flush=True)
         print(f"[score] {bb.key}/{framing}: {N:,} bigneg windows -> {D}")
-
-
-def load_bigneg(R, bb: str, framing: str, pool: str):
-    D = R.probes(bb, framing)
-    prog_p = D / f"{pool}.bigneg_progress.json"
-    if not prog_p.exists() or not json.loads(prog_p.read_text()).get("complete"):
-        return None, None
-    ids = json.loads((D / "bigneg_ids.json").read_text())
-    z = np.load(D / f"{pool}.probes.npz")
-    T, S, L1, _ = z["W"].shape
-    return np.memmap(D / f"{pool}.bigneg_scores.f32", dtype=np.float32, mode="r", shape=(len(ids), T, S, L1)), ids
 
 
 def main(argv=None) -> int:

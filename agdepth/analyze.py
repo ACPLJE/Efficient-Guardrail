@@ -9,9 +9,11 @@ the whole test set (+ big pool), the same replicate weights apply to every contr
 two contrasts gets a paired CI.
 
 Gate (plan §8.2 E0.3): l95(inj vs instruction-heavy negatives) >= 1.5 x l95(harm vs all negatives), on the primary
-metric TPR@primary-FPR (the smallest target in FPR_TARGETS with >= 5 expected false positives in every gate contrast).
-The ratio uses max(l95_harm, 1) so a harm curve that is already saturated at the embeddings does not divide by zero;
-the relative-depth gap (l95_inj - l95_harm) / L is reported next to it.
+metric TPR at window FPR 2e-4 (PRIMARY_FPR, plan §8.2 / §9.1 / SPEC 6.5).  When the negatives cannot resolve 2e-4
+(< 5 expected false positives) the verdict is INCONCLUSIVE -- the metric is never switched silently; --primary-fpr
+overrides it explicitly and the report says so.  The ratio uses max(l95_harm, 1) so a harm curve that is already
+saturated at the embeddings does not divide by zero (DECISIONS D-041); the relative-depth gap (l95_inj - l95_harm) / L
+and the compute ratio l95 / L (SPEC 6.5) are reported next to it.
 
     python -m agdepth.analyze --run NAME [--primary-fpr 2e-4] [--n-boot 1000]
 """
@@ -29,7 +31,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .config import COMPARISONS, FPR_TARGETS, GATE, L95_FRAC, TASKS, AGPaths
+from .config import COMPARISONS, FPR_TARGETS, GATE, L95_FRAC, PRIMARY_FPR, TASKS, AGPaths
 from . import metrics as MX
 
 CONTRAST_STYLE = [   # (task, negset, label) in fixed categorical order -> colours never depend on what is present
@@ -50,27 +52,25 @@ def discover(R) -> List[Tuple[str, str, str]]:
     return out
 
 
-def _bigneg_ready(R, bb, framing, pool) -> bool:
+def _bigneg_ready(R, bb, framing, pool, dsha: str) -> Tuple[bool, str]:
+    """(usable, reason) for the big-pool scores of one combo."""
     D = R.probes(bb, framing)
     prog_p = D / f"{pool}.bigneg_progress.json"
     if not prog_p.exists():
-        return False
+        return False, "not scored (run score / pipeline)"
     prog = json.loads(prog_p.read_text())
     sha = hashlib.sha1((D / f"{pool}.probes.npz").read_bytes()).hexdigest()[:16]
-    return bool(prog.get("complete")) and prog.get("probes_sha") == sha
+    if prog.get("data_manifest_sha") != dsha:
+        return False, "scored on another dataset"
+    if prog.get("probes_sha") != sha:
+        return False, "stale (probes re-fit after scoring)"
+    if not prog.get("complete"):
+        return False, f"incomplete ({len(prog.get('done', []))} shards done)"
+    return True, "ok"
 
 
 def _bigneg_scores(R, bb, framing, pool, n_tasks, n_seeds, L1):
     D = R.probes(bb, framing)
-    prog_p = D / f"{pool}.bigneg_progress.json"
-    if not prog_p.exists():
-        return None, None
-    prog = json.loads(prog_p.read_text())
-    sha = hashlib.sha1((D / f"{pool}.probes.npz").read_bytes()).hexdigest()[:16]
-    if not prog.get("complete") or prog.get("probes_sha") != sha:
-        print(f"[analyze] {bb}/{framing}/{pool}: big-pool scores incomplete or stale (probes re-fit) -> ignored; "
-              f"re-run score", file=sys.stderr)
-        return None, None
     ids = json.loads((D / "bigneg_ids.json").read_text())
     mm = np.memmap(D / f"{pool}.bigneg_scores.f32", dtype=np.float32, mode="r", shape=(len(ids), n_tasks, n_seeds, L1))
     return mm, ids
@@ -133,6 +133,7 @@ def curves_of(c: Contrast, targets: Sequence[float]) -> Dict[str, np.ndarray]:
     per_seed = [MX.curves(c.Sp[s], c.Sn[s], targets) for s in range(c.Sp.shape[0])]
     out = {k: np.mean([p[k] for p in per_seed], 0) for k in per_seed[0]}
     out["_per_seed_l95"] = {k: [l95_of(k, p[k]) for p in per_seed] for k in per_seed[0] if not k.startswith("fpr")}
+    out["_per_seed"] = per_seed
     return out
 
 
@@ -149,13 +150,23 @@ def gate_n_neg(te_cls, big_cls, with_big: bool) -> int:
 
 
 def choose_primary(n_min: int, explicit: Optional[float]) -> Tuple[float, str]:
-    """One primary FPR for the whole run (every combo and figure uses the same metric)."""
-    if explicit:
-        return explicit, "set on the command line"
-    for t in sorted(FPR_TARGETS):
-        if MX.resolvable(n_min, t):
-            return t, f"smallest target with >= 5 expected false positives (min n_neg in the gate contrasts = {n_min:,})"
-    return max(FPR_TARGETS), f"no target is resolvable with n_neg = {n_min:,}; using {max(FPR_TARGETS):g} (underpowered)"
+    """The plan's TPR @ 2e-4 unless overridden; never switched silently (an unresolvable target -> INCONCLUSIVE)."""
+    t = explicit or PRIMARY_FPR
+    src = "set on the command line (plan: 2e-4)" if explicit and explicit != PRIMARY_FPR else "plan §8.2 E0.3 / SPEC 6.5"
+    if MX.resolvable(n_min, t):
+        return t, f"{src}; resolvable (min n_neg in the gate contrasts = {n_min:,})"
+    need = int(np.ceil(5 / t))
+    return t, (f"{src}; NOT resolvable with min n_neg = {n_min:,} (needs >= {need:,} for 5 expected false positives) "
+               f"-> gate INCONCLUSIVE; build with a big pool (--n-bigneg) or report a looser FPR explicitly")
+
+
+def fpr_key(t: float) -> str:
+    """SPEC 7.3 key of a window FPR: 2e-4 -> '2e-4'."""
+    m, e = f"{t:.0e}".split("e")
+    return f"{m}e{int(e)}"
+
+
+NEGSET_SPEC = {"plain": "general", "instr": "instr_heavy", "notinject": "notinject"}   # SPEC 2.6 negative_set names
 
 
 def bootstrap(contrasts: Dict[str, Contrast], n_groups: int, primary: float, n_boot: int, L: int,
@@ -168,7 +179,9 @@ def bootstrap(contrasts: Dict[str, Contrast], n_groups: int, primary: float, n_b
         counts = np.bincount(rng.integers(0, n_groups, n_groups), minlength=n_groups).astype(np.float64)
         for k, c in contrasts.items():
             wp, wn = counts[c.gp], counts[c.gn]
-            if wp.sum() == 0 or wn.sum() == 0:
+            if wp.sum() == 0 or wn.sum() == 0:              # keep replicate indices aligned across contrasts
+                res[k]["tpr"].append(np.full(L, np.nan))
+                res[k]["auroc"].append(np.full(L, np.nan))
                 continue
             res[k]["tpr"].append(boots[k].tpr(wp, wn))
             res[k]["auroc"].append(boots[k].auroc(wp, wn))
@@ -193,17 +206,20 @@ def compare(name: str, a: Tuple[str, str], b: Tuple[str, str], cur: Dict, boot: 
     la, lb = l95_of(metric_key, cur[ka][metric_key]), l95_of(metric_key, cur[kb][metric_key])
     rec = {"comparison": name, "shallow": ka, "deep": kb, "metric": metric_key, "n_layers": L,
            "l95_shallow": la, "l95_deep": lb, "rel_shallow": la / L, "rel_deep": lb / L,
+           "compute_ratio_shallow": la / L, "compute_ratio_deep": lb / L,
            "ratio": lb / max(la, 1.0) if np.isfinite(la) and np.isfinite(lb) else float("nan"),
            "rel_gap": (lb - la) / L if np.isfinite(la) and np.isfinite(lb) else float("nan"),
            "max_shallow": float(np.nanmax(cur[ka][metric_key])), "max_deep": float(np.nanmax(cur[kb][metric_key]))}
     if boot and ka in boot and kb in boot and boot_key in boot[ka] and boot_key in boot[kb]:
         sa, sb = boot[ka][boot_key]["l95"], boot[kb][boot_key]["l95"]
-        n = min(sa.size, sb.size)
-        ratio = sb[:n] / np.maximum(sa[:n], 1.0)
-        gap = (sb[:n] - sa[:n]) / L
+        ok = np.isfinite(sa) & np.isfinite(sb)              # same replicate index = same resample (paired)
+        sa, sb = sa[ok], sb[ok]
+        ratio = sb / np.maximum(sa, 1.0)
+        gap = (sb - sa) / L
         rec.update(l95_shallow_ci=MX.percentile_ci(sa), l95_deep_ci=MX.percentile_ci(sb), ratio_ci=MX.percentile_ci(ratio),
-                   rel_gap_ci=MX.percentile_ci(gap), p_ratio_ge_min=float(np.mean(ratio >= GATE["min_ratio"])),
-                   p_deeper=float(np.mean(sb[:n] > sa[:n])), n_boot=int(n))
+                   rel_gap_ci=MX.percentile_ci(gap),
+                   p_ratio_ge_min=float(np.mean(ratio >= GATE["min_ratio"])) if ratio.size else float("nan"),
+                   p_deeper=float(np.mean(sb > sa)) if sa.size else float("nan"), n_boot=int(ok.sum()))
     floor = PEAK_FLOOR["auroc" if metric_key.startswith("auroc") else "tpr"]
     under = metric_key.startswith("tpr@") and n_neg is not None and \
         not all(MX.resolvable(n_neg.get(k, 0), float(metric_key[4:])) for k in (ka, kb))
@@ -337,10 +353,14 @@ def _ci(ci, scale=1.0, nd=2):
 
 def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int] = None, P: Optional[AGPaths] = None,
             only: Optional[Sequence[str]] = None) -> Dict:
-    from .windows import read_jsonl_gz
+    from ag.harness.writer import atomic_write_json, write_rows
+    from . import lineage as LN
+    from .fit import stored_sha
+    from .windows import exp_of, load_card, read_jsonl_gz
     P = P or AGPaths.load()
     R = P.run(run)
-    card = json.loads(R.datacard.read_text())
+    card = load_card(R)
+    dsha = card["data_manifest_sha"]
     n_boot = card["recipe"]["profile"]["n_boot"] if n_boot is None else n_boot
     rows = read_jsonl_gz(R.windows)
     test = [r for r in rows if r["split"] == "test"]
@@ -354,10 +374,20 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
     big_cls = np.array([r["cls"] for r in big]) if big else None
     big_g = np.array([gi[r["group"]] for r in big]) if big else None
     combos = [c for c in discover(R) if not only or c[0] in only]
+    stale = [c for c in combos if stored_sha(R.probes(c[0], c[1]) / f"{c[2]}.test_scores.npz") != dsha]
+    for c in stale:
+        print(f"[analyze] {'/'.join(c)}: probes were fit on another dataset than {R.windows} -> skipped "
+              f"(re-run the pipeline for this backbone)", file=sys.stderr)
+    combos = [c for c in combos if c not in stale]
     if not combos:
-        raise SystemExit(f"[analyze] no probe scores under {R.root / 'probes'}: run extract + fit first")
+        raise SystemExit(f"[analyze] no current probe scores under {R.root / 'probes'}: run extract + fit first")
     R.report.mkdir(parents=True, exist_ok=True)
-    big_ok = {c: bool(big) and _bigneg_ready(R, *c) for c in combos}
+    big_ok = {}
+    for c in combos:
+        ok, why = _bigneg_ready(R, *c, dsha) if big else (False, "no big pool in this dataset")
+        big_ok[c] = ok
+        if big and not ok:
+            print(f"[analyze] {'/'.join(c)}: big pool {why} -> test negatives only for this combo", file=sys.stderr)
     n_min = min(gate_n_neg(te_cls, big_cls, big_ok[c]) for c in combos)
     primary, primary_note = choose_primary(n_min, primary_fpr)
     targets = sorted(set(FPR_TARGETS) | {primary}, reverse=True)
@@ -365,13 +395,29 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
     results: Dict = {}
     table: List[Dict] = []
     gates: List[Dict] = []
+    probe_rows: List[Dict] = []
+    exp_id = exp_of_card(card)
+    parents = [card.get("run_id", "")] + [_bb_run_id(R, b) for b in sorted({c[0] for c in combos})]
+    model_sha = {}
+    for c in combos:
+        mp = R.feats(c[0], c[1]) / "meta.json"
+        if mp.exists():
+            model_sha[c[0]] = json.loads(mp.read_text()).get("model_sha") or ""
+    acfg = {"data_manifest_sha": dsha, "primary_fpr": primary, "n_boot": n_boot, "combos": ["/".join(c) for c in combos],
+            "gate": GATE, "l95_frac": L95_FRAC, "fpr_targets": list(FPR_TARGETS)}
+    chash = LN.config_hash(acfg)
+    run_id = LN.make_run_id(exp_id, "analyze", "all", f"depthwin-{card['recipe']['profile']['window']}", chash,
+                            int(card["recipe"].get("seed", 0)))
+    lin = LN.start(R.report, run_id, exp_id, chash, seed=int(card["recipe"].get("seed", 0)),
+                   producer="mock" if card.get("smoke") else "reference", model_sha=model_sha, data_manifest_sha=dsha,
+                   parents=[p for p in parents if p], fresh=True)
     for combo in combos:
         bb, framing, pool = combo
         z = np.load(R.probes(bb, framing) / f"{pool}.test_scores.npz")
         tasks = [str(t) for t in z["tasks"]]
         ids = [str(x) for x in z["test_ids"]]
         if ids != te_ids:
-            raise SystemExit(f"[analyze] {combo}: test ids differ from {R.windows} (rebuilt dataset? re-run extract/fit)")
+            raise SystemExit(f"[analyze] {combo}: test ids differ from {R.windows} (re-run extract/fit)")
         sc = z["scores"]                                           # [T, S, n_test, L1]
         T, S, _, L1 = sc.shape
         L = L1 - 1
@@ -400,8 +446,10 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
         for k, c in C.items():
             e = {}
             for m in ["auroc"] + [f"tpr@{t:g}" for t in targets]:
-                e[m] = {"l95": l95_of(m, cur[k][m]), "max": float(np.nanmax(cur[k][m])),
-                        "at_last": float(cur[k][m][-1]), "per_seed_l95": cur[k]["_per_seed_l95"].get(m)}
+                l95 = l95_of(m, cur[k][m])
+                e[m] = {"l95": l95, "compute_ratio": l95 / L, "max": float(np.nanmax(cur[k][m])),
+                        "at_last": float(cur[k][m][-1]), "per_seed_l95": cur[k]["_per_seed_l95"].get(m),
+                        "resolvable": MX.resolvable(c.Sn.shape[1], float(m[4:])) if m.startswith("tpr@") else True}
             for m, bk in ((pm, "tpr"), ("auroc", "auroc")):
                 if k in boot and bk in boot[k]:
                     e[m]["l95_ci"] = MX.percentile_ci(boot[k][bk]["l95"])
@@ -414,6 +462,18 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
                     g["combo"] = f"{bb} / {framing} / {pool}"
                     cmp_.append(g)
         gates += cmp_
+        seeds = [int(x) for x in z["seeds"]]
+        for k, c in C.items():                              # SPEC 7.3-style rows, one per seed (not seed means)
+            t_name, ns = k.split("/")
+            for si, per in enumerate(cur[k]["_per_seed"]):
+                for l in range(L1):
+                    probe_rows.append({
+                        "backbone": bb, "framing": framing, "pooling": pool, "layer": l, "rel_depth": l / L,
+                        "task": t_name, "negative_set": NEGSET_SPEC.get(ns, ns), "negative_set_poc": ns,
+                        "seed": seeds[si], "auroc": float(per["auroc"][l]),
+                        "tpr_at_fpr": {fpr_key(t): float(per[f"tpr@{t:g}"][l]) for t in targets},
+                        "achieved_fpr": {fpr_key(t): float(per[f"fpr@{t:g}"][l]) for t in targets},
+                        "n_pos": int(c.Sp.shape[1]), "n_neg": int(c.Sn.shape[1])})
         fitj = R.probes(bb, framing) / f"{pool}.fit.json"
         controls = json.loads(fitj.read_text()).get("controls_shuffled_auroc") if fitj.exists() else None
         results[combo] = {"n_layers": L, "curves": cur, "boot": boot, "summary": summ, "comparisons": cmp_,
@@ -422,7 +482,18 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
         if g0:
             print(f"[analyze] {bb}/{framing}/{pool}: l95 harm={_fmt(g0['l95_shallow'], 0)} inj|instr={_fmt(g0['l95_deep'], 0)} "
                   f"/ L={L}  ratio={_fmt(g0['ratio'], 2)}{_ci(g0.get('ratio_ci'))}  {g0['verdict']}", flush=True)
-    lex = analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary)
+    lex = analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary, dsha)
+    write_rows(R.report / "probe_results.jsonl", run_id, probe_rows)
+    e11 = {}
+    for fr in sorted({c[1] for c in combos}):
+        for po in sorted({c[2] for c in combos}):
+            gs = [g for g in gates if g["comparison"] == "gate" and g["metric"] == pm
+                  and g["combo"].endswith(f" / {fr} / {po}")]
+            if gs:
+                n_pass = sum(g["verdict"] == "PASS" for g in gs)
+                e11[f"{fr}/{po}"] = {"n_backbones": len(gs), "n_pass": n_pass,
+                                     "e11_criterion_2plus": n_pass >= 2,
+                                     "verdicts": {g["combo"].split(" / ")[0]: g["verdict"] for g in gs}}
     # ---- outputs
     keys = sorted({k for r in table for k in r}, key=lambda k: (k not in ("backbone", "framing", "pooling", "contrast",
                                                                           "layer", "rel_depth"), k))
@@ -440,7 +511,8 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
     pg = fig_gap(gates, R.report / "fig_l95_gap.png")
     if pg:
         figs.append(pg)
-    summary = {"run": run, "analyzed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "recipe_hash": card["recipe_hash"],
+    summary = {"run": run, "run_id": run_id, "analyzed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "recipe_hash": card["recipe_hash"], "data_manifest_sha": dsha, "e11_backbones": e11,
                "profile": card["recipe"]["profile"]["name"], "split_mode": card["recipe"]["split_mode"],
                "primary_metric": pm, "primary_note": primary_note,
                "gate": {"rule": f"l95({GATE['deep'][0]}/{GATE['deep'][1]}) >= {GATE['min_ratio']} x "
@@ -449,38 +521,43 @@ def analyze(run: str, primary_fpr: Optional[float] = None, n_boot: Optional[int]
                "per_combo": {"|".join(c): {"summary": v["summary"], "controls_shuffled_auroc": v["controls"],
                                            "n_layers": v["n_layers"]} for c, v in results.items()},
                "figures": [str(p) for p in figs]}
-    (R.report / "summary.json").write_text(json.dumps(summary, indent=2, default=_json_default))
+    atomic_write_json(R.report / "summary.json", summary)
     md = report_md(summary, card, results)
     (R.report / "report.md").write_text(md, encoding="utf-8")
+    LN.finish(R.report, lin)
     print(f"[analyze] -> {R.report / 'report.md'}")
     return summary
 
 
-def _json_default(o):
-    if isinstance(o, (np.floating, np.integer)):
-        return o.item()
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    if isinstance(o, tuple):
-        return list(o)
-    return str(o)
+def exp_of_card(card: Dict) -> str:
+    from .config import EXP_OF_PROFILE
+    return EXP_OF_PROFILE.get(str(card["recipe"]["profile"]["name"]).split("+")[0], "E0.3")
 
 
-def analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary: float) -> Dict:
+def _bb_run_id(R, bb: str) -> str:
+    f = R.bb_run(bb) / "run_id.txt"
+    return f.read_text().strip() if f.exists() else ""
+
+
+def analyze_lex(R, te_ids, te_cls, te_g, big_ids, big_cls, big_g, primary: float, dsha: str) -> Dict:
+    from .fit import stored_sha
     f = R.lex / "lex.test_scores.npz"
     if not f.exists():
         return {}
+    if stored_sha(f) != dsha:
+        print("[analyze] lexical baseline was fit on another dataset -> omitted (re-run fit)", file=sys.stderr)
+        return {"error": "lexical baseline is stale (another dataset)"}
     z = np.load(f)
-    if [str(x) for x in z["test_ids"]] != te_ids:
-        return {"error": "lexical scores do not match the test windows"}
     sc = z["scores"]
     tasks = [str(t) for t in z["tasks"]]
     bigf = R.lex / "lex.bigneg_scores.npz"
     bmm = None
-    if bigf.exists():
-        zb = np.load(bigf)
-        if [str(x) for x in zb["ids"]] == big_ids:
-            bmm = zb["scores"]
+    if big_ids:
+        if bigf.exists() and stored_sha(bigf) == dsha:
+            bmm = np.load(bigf)["scores"]
+        else:
+            print("[analyze] lexical big-pool scores missing or stale -> lexical baseline on test negatives only",
+                  file=sys.stderr)
     C = build_contrasts(sc, tasks, te_cls, te_g, bmm, big_cls, big_g)
     out = {}
     for k, c in C.items():

@@ -1,21 +1,28 @@
 """Configuration of the depth-asymmetry PoC: paths, backbones, snippet classes, contrasts, profiles, sources.
 
-Every number that shapes the experiment lives here.  The window recipe (window length, snippet length band, split
-fractions) is hashed into datacard.json so a changed recipe is visible in the data.
+Every number that shapes the experiment lives here.  The window recipe is hashed into datacard.json (recipe_hash) and
+the windows themselves get a content hash (data_manifest_sha); every derived file records the latter, so features,
+probes and scores of a rebuilt dataset are never mixed with the new windows.
 
-Directory layout, rooted at $AG_OUT (default $LG_OUT/agdepth):
+Output root (never the SPEC 7.1 layout of $AG_OUT itself -- this PoC is not yet a SPEC experiment, DECISIONS D-041):
+    $AGDEPTH_OUT, else $AG_OUT/poc/agdepth, else $LG_OUT/agdepth
+Directory layout under the root:
     <run>/data/windows.jsonl.gz      train/val/test windows (one inserted snippet each)
     <run>/data/bigneg.jsonl.gz       optional large negative pool (test snippets x test backgrounds)
-    <run>/data/datacard.json         counts, length stats, split audit, recipe hash
+    <run>/data/datacard.json         counts, length stats, split audit, recipe_hash, data_manifest_sha
+    <run>/data/lineage.json          lineage of the build run (CLAUDE.md 3.3)
     <run>/feats/<bb>/<framing>/      <pool>.f16 memmaps [L+1, N, d], meta.json, progress.json
-    <run>/probes/<bb>/<framing>/     <pool>.probes.npz (weights), <pool>.test_scores.npz, <pool>.bigneg_scores.npz
+    <run>/probes/<bb>/               lineage.json + run_id.txt of the backbone run (extract + fit + score)
+    <run>/probes/<bb>/<framing>/     <pool>.probes.npz (weights), <pool>.test_scores.npz, <pool>.bigneg_scores.f32
     <run>/lex/                       lexical (hashed n-gram) baseline scores
-    <run>/report/                    layer_metrics.csv, summary.json, report.md, fig_*.png
+    <run>/report/                    lineage.json, probe_results.jsonl, layer_metrics.csv, summary.json, report.md, fig_*.png
+    <run>/slurm/, <run>/logs/        rendered sbatch scripts and their logs
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -36,12 +43,19 @@ class AGPaths:
     python: str
 
     @classmethod
-    def load(cls) -> "AGPaths":
+    def load(cls, root: Optional[Path] = None) -> "AGPaths":
         load_env_file()
         p1 = S1Paths.load()
-        root = Path(env("AG_OUT", str(p1.out / "agdepth")))
+        if root is None:
+            if env("AGDEPTH_OUT"):
+                root = Path(env("AGDEPTH_OUT"))
+            elif env("AG_OUT"):
+                root = Path(env("AG_OUT")) / "poc" / "agdepth"      # beside, never inside, the SPEC 7.1 raw/ tree
+            else:
+                root = p1.out / "agdepth"
         data_v2 = Path(env("LG_DATA_V2", str(p1.sources.parent)))
-        return cls(root=root, out=p1.out, sources=p1.sources, data_v2=data_v2, hf_home=p1.hf_home, python=p1.python)
+        return cls(root=Path(root).expanduser().resolve(), out=p1.out, sources=p1.sources, data_v2=data_v2,
+                   hf_home=p1.hf_home, python=p1.python)
 
     def run(self, name: str) -> "RunPaths":
         return RunPaths(self.root / name)
@@ -73,6 +87,18 @@ class RunPaths:
     def probes(self, bb: str, framing: str) -> Path:
         return self.root / "probes" / bb / framing
 
+    def bb_run(self, bb: str) -> Path:
+        """Run directory of one backbone (lineage.json, run_id.txt)."""
+        return self.root / "probes" / bb
+
+    @property
+    def slurm(self) -> Path:
+        return self.root / "slurm"
+
+    @property
+    def logs(self) -> Path:
+        return self.root / "logs"
+
     @property
     def lex(self) -> Path:
         return self.root / "lex"
@@ -86,7 +112,8 @@ class RunPaths:
 # backbones (layer counts are read from the model config at run time; the numbers here are documentation)
 # ----------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
-class Backbone:
+class BackboneSpec:
+    """A registry entry (named *Spec so it does not clash with the SPEC 2.6 `Backbone` protocol)."""
     key: str
     repo: str
     role: str
@@ -95,32 +122,41 @@ class Backbone:
     gated: bool = False
     min_gpu_gb: int = 24
     tokens_per_batch: int = 32768       # extraction batch budget (padded tokens); halved on OOM
+    # task framing: "tokenizer" = the tokenizer's chat template (instruct targets); "chatml" / "llama3" = a neutral
+    # user/assistant turn of the model family, used for guards whose own template is a moderation prompt
+    chat: str = "tokenizer"
 
 
-BACKBONES: Dict[str, Backbone] = {b.key: b for b in [
-    Backbone("qwen3guard_0.6b", "Qwen/Qwen3Guard-Gen-0.6B", "guard, LG backbone (plan E0.3 / E1.1)", 28, 1024,
-             tokens_per_batch=65536),
-    Backbone("qwen3guard_4b", "Qwen/Qwen3Guard-Gen-4B", "guard (plan E1.1)", 36, 2560),
-    Backbone("llama31_8b", "meta-llama/Llama-3.1-8B-Instruct", "target T1 (plan E0.3 / E1.1)", 32, 4096, gated=True,
-             min_gpu_gb=40, tokens_per_batch=16384),
-    Backbone("qwen3_4b_2507", "Qwen/Qwen3-4B-Instruct-2507", "target T2 (plan E1.1)", 36, 2560),
-    Backbone("qwen3guard_8b", "Qwen/Qwen3Guard-Gen-8B", "guard (optional)", 36, 4096, min_gpu_gb=40,
-             tokens_per_batch=16384),
-    Backbone("llamaguard3_8b", "meta-llama/Llama-Guard-3-8B", "guard (optional, cross-family)", 32, 4096, gated=True,
-             min_gpu_gb=40, tokens_per_batch=16384),
-    Backbone("qwen3_8b", "Qwen/Qwen3-8B", "target (optional; 32k native)", 36, 4096, min_gpu_gb=40,
-             tokens_per_batch=16384),
+BACKBONES: Dict[str, BackboneSpec] = {b.key: b for b in [
+    BackboneSpec("qwen3guard_0.6b", "Qwen/Qwen3Guard-Gen-0.6B", "guard, LG backbone (plan E0.3 / E1.1)", 28, 1024,
+                 tokens_per_batch=65536, chat="chatml"),
+    BackboneSpec("qwen3guard_4b", "Qwen/Qwen3Guard-Gen-4B", "guard (plan E1.1)", 36, 2560, chat="chatml"),
+    BackboneSpec("llama31_8b", "meta-llama/Llama-3.1-8B-Instruct", "target T1 (plan E0.3 / E1.1)", 32, 4096, gated=True,
+                 min_gpu_gb=40, tokens_per_batch=16384),
+    BackboneSpec("qwen3_4b_2507", "Qwen/Qwen3-4B-Instruct-2507", "target T2 (plan E1.1)", 36, 2560),
+    BackboneSpec("qwen3guard_8b", "Qwen/Qwen3Guard-Gen-8B", "guard (optional)", 36, 4096, min_gpu_gb=40,
+                 tokens_per_batch=16384, chat="chatml"),
+    BackboneSpec("llamaguard3_8b", "meta-llama/Llama-Guard-3-8B", "guard (optional, cross-family)", 32, 4096,
+                 gated=True, min_gpu_gb=40, tokens_per_batch=16384, chat="llama3"),
+    BackboneSpec("qwen3_8b", "Qwen/Qwen3-8B", "target (optional; 32k native)", 36, 4096, min_gpu_gb=40,
+                 tokens_per_batch=16384),
 ]}
 E03_BACKBONES = ["qwen3guard_0.6b", "llama31_8b"]                                   # plan E0.3
 E11_BACKBONES = ["qwen3guard_0.6b", "qwen3guard_4b", "llama31_8b", "qwen3_4b_2507"]  # plan E1.1
+BACKBONE_ALIASES = {"e03": E03_BACKBONES, "e11": E11_BACKBONES}
 
 
-def backbone(key: str) -> Backbone:
+def is_local_model(key: str) -> bool:
+    return Path(key).expanduser().is_dir()
+
+
+def backbone(key: str) -> BackboneSpec:
     if key in BACKBONES:
         return BACKBONES[key]
     # a local directory or an unlisted repo id (tests, ad-hoc runs)
-    name = Path(key).name.replace("/", "_") if "/" in key or Path(key).exists() else key
-    return Backbone(name, key, "ad-hoc", 0, 0)
+    name = Path(key).name if is_local_model(key) else key.replace("/", "_")
+    repo = str(Path(key).expanduser().resolve()) if is_local_model(key) else key
+    return BackboneSpec(name, repo, "ad-hoc", 0, 0)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -166,6 +202,7 @@ COMPARISONS = [
     ("plain_vs_plain", ("harm", "plain"), ("inj", "plain")),
 ]
 FPR_TARGETS = (1e-2, 1e-3, 2e-4, 5e-5)       # 2e-4 = window FPR that keeps document FPR at 5 % for 32k (plan §2.2)
+PRIMARY_FPR = 2e-4                           # plan §8.2 E0.3 / §9.1 Fig. 3 / SPEC 6.5: l95 and the gate are read here
 L95_FRAC = 0.95
 
 
@@ -189,18 +226,20 @@ class Profile:
 
 PROFILES: Dict[str, Profile] = {p.name: p for p in [
     Profile("smoke", 96, (4, 40), 40, 12, 24, 30, (0,), 40, 160),
-    Profile("quick", 256, (12, 112), 1500, 300, 600, 0, (0, 1, 2), 500, 320),
+    # quick: 30k big-pool windows per class so TPR @ 2e-4 sits on >= 5 expected false positives (plan E0.3)
+    Profile("quick", 256, (12, 112), 1500, 300, 600, 30_000, (0, 1, 2), 500, 320),
     Profile("full", 256, (12, 112), 4000, 500, 1500, 100_000, (0, 1, 2, 3, 4), 1000, 320),
 ]}
 BIGNEG_CLASSES = ("plain", "instr", "harm_hard")
 SPLIT_FRACTIONS = {"train": 0.6, "val": 0.1, "test": 0.3}       # by snippet group and by background document
 DEPTH_RANGE = (0.05, 0.95)                                    # relative insertion position inside the window
 SEED = 20261011
+EXP_OF_PROFILE = {"smoke": "E0.3", "quick": "E0.3", "full": "E1.1"}
 FRAMINGS = ("raw", "task")
 POOLINGS = ("mean", "last", "span")
 DEFAULT_POOLINGS = ("mean", "last")
 LAMBDAS = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)                       # L2 grid for the probes (picked on val AUROC)
-TRAIN_SUBSAMPLE = 0.85                                        # seed s > 0 trains on this share of train groups
+TRAIN_SUBSAMPLE = 0.85                                        # every seed trains on this share of train groups
 
 
 # ----------------------------------------------------------------------------------------------
@@ -217,6 +256,7 @@ class SnipSource:
     file_globs: Tuple[str, ...] = ()
     max_items: Optional[int] = None
     holdout: bool = False                      # split_mode=source: this source is test-only
+    test_only: bool = False                    # test-only in every split mode (plan 5.2: LLMail-Inject is held out)
     note: str = ""
 
 
@@ -230,7 +270,7 @@ SNIP_SOURCES: List[SnipSource] = [
     SnipSource("deepset_pi", "inj", "registry", "load_text_label", "deepset_pi", "deepset/prompt-injections",
                ("*.parquet", "*.csv", "*.jsonl"), note="label == 1 rows (English and German)"),
     SnipSource("llmail", "inj", "registry", "load_llmail", "llmail", "microsoft/llmail-inject-challenge",
-               ("*.jsonl", "*.json", "*.parquet"), max_items=20000, holdout=True,
+               ("*.jsonl", "*.json", "*.parquet"), max_items=20000, holdout=True, test_only=True,
                note="LLMail-Inject submissions (subject + body); human-written adaptive attacks"),
     SnipSource("gandalf", "inj", "registry", "load_text_label", "gandalf", "Lakera/gandalf_ignore_instructions",
                ("*.parquet", "*.csv", "*.jsonl"), max_items=1000, note="every row is an injection attempt"),
@@ -283,10 +323,13 @@ S1_DEPENDENCIES = ["qwen3guard_gen_0.6b", "qwen3guard_gen_4b", "wildguardmix", "
                    "harmbench", "xstest", "govreport", "pg19", "arxiv", "wiki_en", "pubmed", "stack"]
 
 
-def recipe(profile: Profile, split_mode: str, bg_domains, ref_tok: str) -> Dict:
-    return {"version": "agdepth/recipe-1.0", "profile": asdict(profile), "split_mode": split_mode,
-            "split_fractions": SPLIT_FRACTIONS, "depth_range": DEPTH_RANGE, "seed": SEED, "bg_domains": list(bg_domains),
-            "ref_tokenizer": ref_tok, "insert_rule": "background span + blank line + snippet + blank line + background span; "
+def recipe(profile: Profile, split_mode: str, bg_domains, ref_tok: str, seed: int = SEED,
+           sources: Optional[List[str]] = None) -> Dict:
+    """The data recipe.  `bg_domains` are the domains actually found, `sources` the snippet sources actually read."""
+    return {"version": "agdepth/recipe-1.1", "profile": asdict(profile), "split_mode": split_mode,
+            "split_fractions": SPLIT_FRACTIONS, "depth_range": DEPTH_RANGE, "seed": seed, "bg_domains": list(bg_domains),
+            "sources": sorted(sources or []), "ref_tokenizer": ref_tok,
+            "insert_rule": "background span + blank line + snippet + blank line + background span; "
             "cut points snapped to whitespace", "label_rule": "window label = class of the inserted snippet"}
 
 

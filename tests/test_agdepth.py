@@ -211,7 +211,8 @@ def _planted_run(P, name: str, harm_from: int, inj_from: int, L1: int = 9, d: in
     prof = PROFILES["smoke"]
     rec = recipe(prof, "group", ["synthetic"], "none")
     card = {"recipe": rec, "recipe_hash": recipe_hash(rec), "windows": {}, "snippet_tokens": {}, "windows_by_source": {},
-            "audit": {"pass": True}, "bigneg": {}, "shortfall": {}}
+            "audit": {"pass": True}, "bigneg": {}, "shortfall": {}, "data_manifest_sha": f"planted{harm_from}{inj_from}",
+            "run_id": ""}
     R.datacard.write_text(json.dumps(card))
     D = R.feats("planted", "raw")
     D.mkdir(parents=True, exist_ok=True)
@@ -230,7 +231,8 @@ def _planted_run(P, name: str, harm_from: int, inj_from: int, L1: int = 9, d: in
         mm[l] = X.astype(np.float16)
     mm.flush()
     (D / "ids.json").write_text(json.dumps([r["id"] for r in rows]))
-    (D / "meta.json").write_text(json.dumps({"complete": True, "poolings": ["mean"], "layers": L1, "n": N, "d": d}))
+    (D / "meta.json").write_text(json.dumps({"complete": True, "poolings": ["mean"], "layers": L1, "n": N, "d": d,
+                                             "data_manifest_sha": card["data_manifest_sha"], "model_sha": ""}))
     return R
 
 
@@ -240,7 +242,7 @@ def test_planted_depth_gap_is_recovered(agpaths, harm_from, inj_from, expect):
     from agdepth.fit import fit
     _planted_run(agpaths, "p", harm_from, inj_from)
     fit("p", "planted", ["raw"], ["mean"], seeds=[0, 1], device="cpu", P=agpaths)
-    s = analyze("p", n_boot=30, P=agpaths)
+    s = analyze("p", primary_fpr=1e-2, n_boot=30, P=agpaths)     # 600 test negatives: 2e-4 is not resolvable
     g = next(x for x in s["comparisons"] if x["comparison"] == "gate" and x["metric"].startswith("tpr"))
     assert g["l95_shallow"] == harm_from and g["l95_deep"] == inj_from, g
     assert g["verdict"] == expect, g
@@ -253,6 +255,168 @@ def test_planted_depth_gap_is_recovered(agpaths, harm_from, inj_from, expect):
 # ---------------------------------------------------------------------------------------------- smoke
 def test_smoke_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setenv("LG_ENV_FILE_NO_OVERRIDE", "1")
+    before = os.environ.get("AG_OUT"), os.environ.get("AGDEPTH_OUT")
     import depthctl
-    s = depthctl.cmd_smoke(type("A", (), {"dir": str(tmp_path), "n_boot": 5})())
-    assert s["comparisons"] and Path(tmp_path / "out" / "smoke" / "report" / "report.md").exists()
+    s = depthctl.cmd_smoke(type("A", (), {"dir": str(tmp_path), "n_boot": 5, "primary_fpr": None})())
+    assert (os.environ.get("AG_OUT"), os.environ.get("AGDEPTH_OUT")) == before      # no environment side effects
+    run = tmp_path / "out" / "smoke"
+    assert s["comparisons"] and (run / "report" / "report.md").exists()
+    assert s["primary_metric"] == "tpr@0.0002"                                       # the plan's metric, never switched
+    for d in (run / "data", run / "probes" / "tiny-model", run / "report"):         # CLAUDE.md 3.3
+        lin = json.loads((d / "lineage.json").read_text())
+        assert lin["finished_unix_ns"] and lin["producer"] == "mock" and lin["data_manifest_sha"] == s["data_manifest_sha"]
+    rows = [json.loads(l) for l in open(run / "report" / "probe_results.jsonl")]
+    assert rows and all(r["run_id"] == s["run_id"] and "2e-4" in r["tpr_at_fpr"] for r in rows)
+    json.loads((run / "report" / "summary.json").read_text())                       # strict JSON (no NaN literal)
+    # a second smoke run on the same dir starts from scratch (the extraction code really runs again)
+    s2 = depthctl.cmd_smoke(type("A", (), {"dir": str(tmp_path), "n_boot": 5, "primary_fpr": None})())
+    assert s2["run_id"] != s["run_id"] or s2["data_manifest_sha"] == s["data_manifest_sha"]
+
+
+# ---------------------------------------------------------------------------------------------- regressions (review)
+def test_stratified_draw_is_not_biased_by_file_order():
+    import random
+    from agdepth.windows import stratified_draw
+    items = [{"source": "big", "n_tok": 20 + i % 30, "sid": f"b{i}", "pos": i} for i in range(30000)]
+    out = stratified_draw(items, {b: 1 / 4 for b in range(2, 6)}, 400, 1, random.Random(0))
+    mean_pos = sum(o["pos"] for o in out) / len(out)
+    assert 0.35 * 30000 < mean_pos < 0.65 * 30000, mean_pos          # log-space keys: no underflow to file order
+
+
+def test_stratified_draw_spends_unique_snippets_before_reuse():
+    import random
+    from agdepth.windows import stratified_draw
+    items = [{"source": "s", "n_tok": 8 * b + 1, "sid": f"{b}-{i}"} for b in range(1, 7) for i in range(400)]
+    items += [{"source": "s", "n_tok": 8 * b + 1, "sid": f"{b}-{i}"} for b in range(7, 14) for i in range(10)]
+    out = stratified_draw(items, {b: 1 / 13 for b in range(1, 14)}, 4000, 3, random.Random(0))
+    assert len(out) == 4000 and len({o["sid"] for o in out}) == len(items)   # every distinct snippet used first
+
+
+def test_half_variants_keep_only_valid_labels():
+    from agdepth.windows import half_variants
+    para = ("The committee met on Tuesday to review the budget. The figures were discussed at length. Several "
+            "concerns were raised about the timeline. Submit your comments by Friday. Send them to the clerk.")
+    it = {"source": "mined_instr", "sid": "m:1", "text": para, "meta": {}}
+    assert half_variants([it]) == []                                  # the half has no imperative sentence left
+
+
+def test_llmail_is_test_only_in_every_split_mode():
+    from agdepth.windows import assign_splits
+    for mode in ("group", "source"):
+        by = {"inj": [{"group": f"ll{i}", "holdout": True, "test_only": True, "split": None} for i in range(30)]
+              + [{"group": f"b{i}", "holdout": False, "test_only": False, "split": None} for i in range(30)]}
+        assign_splits(by, mode)
+        assert all(it["split"] == "test" for it in by["inj"] if it["test_only"])
+
+
+def test_registry_files_ignore_failed_download(agpaths):
+    from agdepth.config import SNIP_SOURCE_BY_NAME
+    from agdepth.sources import registry_files
+    d = agpaths.sources / "notinject"
+    d.mkdir(parents=True)
+    (d / "NotInject_one.json").write_text("[]")
+    (d / "revision.json").write_text(json.dumps({"status": "failed"}))
+    assert registry_files(SNIP_SOURCE_BY_NAME["notinject"], agpaths) == []
+    (d / "revision.json").write_text(json.dumps({"status": "ok", "local_path": str(d)}))
+    assert registry_files(SNIP_SOURCE_BY_NAME["notinject"], agpaths)
+
+
+def test_added_tokens_stay_plain_text_and_span_skips_sink(tmp_path):
+    from transformers import AutoTokenizer
+    from agdepth.extract import encode
+    from agdepth.tiny import make_tiny_repo
+    tok = AutoTokenizer.from_pretrained(make_tiny_repo(tmp_path / "m"))
+    tok.add_tokens(["<think>"])                                       # non-special added token (as in Qwen3)
+    think = tok.convert_tokens_to_ids("<think>")
+    text = "Preheat the oven. <think> stir the sauce.\n\nThe river near the city."
+    enc = encode(tok, {"id": "w", "text": text, "snip_span": [0, 40]}, "raw", 512)
+    assert think not in enc["ids"]
+    assert not enc["span"][0] and enc["span"][1:].any()              # snippet at position 0: sink excluded
+
+
+def test_bootstrap_replicates_stay_aligned():
+    from agdepth.analyze import Contrast, bootstrap
+    rng = np.random.default_rng(0)
+    S, L = 1, 3
+    a = Contrast("harm", "all", rng.normal(1, 1, (S, 5, L)), rng.normal(0, 1, (S, 200, L)), np.zeros(5, int),
+                 np.arange(200) % 19 + 1, 0)
+    b = Contrast("inj", "instr", rng.normal(1, 1, (S, 50, L)), rng.normal(0, 1, (S, 200, L)), np.arange(50) % 19 + 1,
+                 np.arange(200) % 19 + 1, 0)
+    out = bootstrap({"harm/all": a, "inj/instr": b}, 20, 1e-2, 40, L)
+    assert out["harm/all"]["tpr"]["l95"].size == out["inj/instr"]["tpr"]["l95"].size == 40
+    assert np.isnan(out["harm/all"]["tpr"]["l95"]).any()             # draws without group 0 stay as NaN rows
+
+
+def test_primary_fpr_is_fixed_at_2e4(agpaths):
+    from agdepth.analyze import analyze
+    from agdepth.fit import fit
+    _planted_run(agpaths, "q", 1, 6)
+    fit("q", "planted", ["raw"], ["mean"], seeds=[0], device="cpu", P=agpaths)
+    s = analyze("q", n_boot=10, P=agpaths)
+    g = next(x for x in s["comparisons"] if x["comparison"] == "gate" and x["metric"].startswith("tpr"))
+    assert s["primary_metric"] == "tpr@0.0002" and g["verdict"].startswith("INCONCLUSIVE"), g
+
+
+def test_rebuild_invalidates_features_and_lexical(agpaths, tmp_path):
+    from agdepth import extract, fit as F
+    from agdepth.config import PROFILES
+    from agdepth.tiny import make_tiny_repo
+    from agdepth.windows import build
+    repo = str(make_tiny_repo(tmp_path / "m"))
+    c1 = build("r", PROFILES["smoke"], smoke=True, P=agpaths, seed=1)
+    M = extract.load(repo, "cpu", "fp32")
+    extract.extract("r", repo, ["raw"], ["mean"], M=M, P=agpaths, budget=4096)
+    F.fit("r", repo, ["raw"], ["mean"], seeds=[0], device="cpu", controls=False, P=agpaths)
+    c2 = build("r", PROFILES["smoke"], smoke=True, P=agpaths, seed=2)
+    assert c1["data_manifest_sha"] != c2["data_manifest_sha"]
+    with pytest.raises(SystemExit):                                   # stale features are refused, not reused
+        F.fit("r", repo, ["raw"], ["mean"], seeds=[0], device="cpu", controls=False, P=agpaths)
+    extract.extract("r", repo, ["raw"], ["mean"], M=M, P=agpaths, budget=4096)    # starts over, no skip
+    meta = json.loads((agpaths.run("r").feats("m", "raw") / "meta.json").read_text())
+    assert meta["data_manifest_sha"] == c2["data_manifest_sha"] and meta["complete"]
+    F.fit("r", repo, ["raw"], ["mean"], seeds=[0], device="cpu", controls=False, P=agpaths)
+    assert F.stored_sha(agpaths.run("r").lex / "lex.test_scores.npz") == c2["data_manifest_sha"]
+
+
+def test_fresh_extract_never_inherits_progress(agpaths, tmp_path, monkeypatch):
+    from agdepth import extract
+    from agdepth.config import PROFILES
+    from agdepth.tiny import make_tiny_repo
+    from agdepth.windows import build
+    repo = str(make_tiny_repo(tmp_path / "m"))
+    build("f", PROFILES["smoke"], smoke=True, P=agpaths)
+    M = extract.load(repo, "cpu", "fp32")
+    extract.extract("f", repo, ["raw"], ["mean"], M=M, P=agpaths, budget=4096)
+    D = agpaths.run("f").feats("m", "raw")
+    assert json.loads((D / "progress.json").read_text())["done"] == [0]
+    real = extract.iter_pooled
+
+    def crash(*a, **k):
+        raise KeyboardInterrupt("simulated preemption")
+    monkeypatch.setattr(extract, "iter_pooled", crash)
+    with pytest.raises(KeyboardInterrupt):                            # new pooling -> fresh start, killed in shard 0
+        extract.extract("f", repo, ["raw"], ["mean", "span"], M=M, P=agpaths, budget=4096)
+    assert not (D / "progress.json").exists()
+    monkeypatch.setattr(extract, "iter_pooled", real)
+    extract.extract("f", repo, ["raw"], ["mean", "span"], M=M, P=agpaths, budget=4096)
+    meta = json.loads((D / "meta.json").read_text())
+    mm = np.memmap(D / "span.f16", dtype=np.float16, mode="r", shape=(meta["layers"], meta["n"], meta["d"]))
+    assert meta["complete"] and np.abs(np.asarray(mm[1])).sum(1).min() > 0     # every window really extracted
+
+
+def test_sbatch_scripts_use_the_ag_environment(agpaths, monkeypatch):
+    import depthctl
+    monkeypatch.setenv("AGDEPTH_OUT", str(agpaths.root))
+    monkeypatch.setattr(depthctl.shutil, "which", lambda name: None)  # no sbatch here: render only
+    assert depthctl.main(["run", "--run", "s", "--backbones", "e03", "--dtype", "fp16", "--sbatch"]) == 0
+    scripts = sorted((agpaths.root / "s" / "slurm").glob("*.sbatch"))
+    assert len(scripts) == 4                                          # build, 2 backbones, analyze
+    for p in scripts:
+        t = p.read_text()
+        assert "slurm/ag_common.sh" in t and "slurm/common.sh" not in t.replace("ag_common", "")
+        assert "--gres=gpu:1" in t and "-p RTX6000ADA" in t and f'AGDEPTH_OUT="{agpaths.root}"' in t
+    assert any("--dtype fp16" in p.read_text() for p in scripts)
+    with pytest.raises(SystemExit):
+        depthctl.main(["run", "--run", "s", "--backbones", "qwen3guard_06b", "--sbatch"])
+    with pytest.raises(SystemExit):
+        depthctl.main(["run", "--run", "s", "--poolings", "mean,max", "--sbatch"])
