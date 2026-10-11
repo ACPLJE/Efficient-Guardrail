@@ -18,6 +18,7 @@ tests/test_ag_selector.py
 tests/test_ag_serde.py
 tests/test_ag_virtual_clock.py
 tests/test_ag_window_map.py
+tests/test_agdepth.py
 tests/test_correctness.py
 tests/test_download_purge.py
 tests/test_handover.py
