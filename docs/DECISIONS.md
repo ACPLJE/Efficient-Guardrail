@@ -35,6 +35,40 @@
 - 영향: SPEC 6.1 ASR 행 문구 수정. 코드(`ag/metrics/score.py`, `ag/data/success_judge.py`)는 이미 이 규칙이다. D-039(`mass_threshold` 정의)는 같은 날 확인했고 S1 정의 그대로 둔다.
 - 보충(2026-10-11, S2 step 0, 결정 내용은 그대로): 판정이 아직 없는 단위(`pending@1`, 라벨 대기)는 ASR·utility 분모에서 빼고 `n_unlabelled`로 센다. 그런 단위는 block됐어도 utility를 0이 아니라 None으로 둔다(분모가 block된 단위만으로 채워져 0으로 기우는 것을 막음). 판정이 있으면 위 규칙 그대로다.
 
+### D-042 E0.1 첫 실행의 데이터, 성공 판정, 집계 B, 표본 수
+
+- 날짜 2026-10-12 · 상태 **결정** · 관련: 계획서 5.1·5.3·8.2(E0.1)·10.2(G0), SPEC 4.3·4.5·6.1·8.1·9.2·11, D-005, D-006, D-014, D-029, D-031, D-041, 구축 계획 S2 ②–④
+- 배경: E0.1 코드(S2 ③④)가 S2 ②보다 먼저 준비된다. S2 ②는 LC-Inject 원천 5개, tool-knowledge 공격, calib/test 분할, gate.json을 만들고 10/15에 동결한다. grader 검증(10/16)도 아직이다. 집계 B의 학습 방법은 계획서와 SPEC이 정하지 않았다.
+- (a) 데이터.
+  - 원래(5.3, 8.2): LC-Inject 실제 원천 5개, 공격 ignore·fake completion·tool-knowledge, 위치 3곳.
+  - 결정(강지의): E0.1을 먼저 초안 생성기 `lc_inject_draft`(D-041)로 돌린다. 공격은 ignore·fake completion 2종이다(tool-knowledge는 초안에 없음). 위치는 10·50·90 %이고, `split`은 아래 (c)대로 calib/test로 나눈다.
+  - **G0는 S2 ② 동결 데이터로 다시 돌린 E0.1로만 판정한다.** 초안 결과는 G0 전에 위험을 미리 보는 용도다.
+- (b) 성공 판정.
+  - 원래(8.1, 4.9): hit@k는 성공한 공격 S에서 잰다. grader는 사람 라벨 200개로 검증한다(D-005).
+  - 결정(강지의): 판정 없이(`success_judge: pending`) 생성과 Record 기록을 먼저 한다. 그동안은 모든 공격(A) 기준 hit@k를 임시값으로 낸다.
+  - 라벨이나 grader 결과가 나오면 run을 다시 돌리지 않는다. 집계 단계(`python -m ag.metrics.pool --labels <파일>`)에서 S 기준 hit@k를 계산하고, 라벨 파일의 sha256을 집계 결과의 출처에 적는다.
+- (c) 집계 B.
+  - 원래(8.2): "calibration 분할에서 학습한 층·head 가중(로지스틱 회귀)"만 정해져 있다.
+  - 결정(강지의가 지금 구현하기로 함. 방법은 아래 기본안):
+    - 특징: 자격 있는 창 w마다 위쪽 절반 층 × head의 창 질량 `chunk_head_mass[c, l, h, w] + chunk_head_mass[c, l, h, w+1]`.
+    - 라벨: w ∈ P(u)(payload 창)이면 1, 나머지 자격 있는 창은 0.
+    - 학습 단위: calibration 분할의 모든 공격 요청(A_calib). 성공 여부와 상관없이 쓰므로 성공 판정 없이 학습할 수 있다.
+    - 모형: 특징을 표준화하고 클래스 균형 가중을 둔 L2 로지스틱 회귀(numpy IRLS).
+      - λ는 요청 묶음(첫 배경 문서) 단위 4겹 교차 검증으로 고른다. 기준은 held-out 요청의 hit@8[all] 평균이다.
+      - 가중은 원래 척도로 바꿔 `<out>/weights/<target>__B.npz`와 `.json`에 저장한다.
+    - 단위: 타깃마다 한 벌. 8k·32k와 표준 chunk 3종을 합쳐 학습한다.
+    - calibration 크기: test의 25 %, 설정마다 공격 150 + 정상 75(계획서 5.3). 계획서 5.1의 "배경 문서와 payload template 단위" 분할을 따른다. 초안 생성기는 배경 문서(문서 id의 sha1 mod 4 == 0이면 calib)와 주입 목표(12개 중 3개가 calib)를 calib/test로 나눈다.
+    - 적용 범위: 표준 chunk 3종만(SPEC 4.5)이고 hit@k[union]은 없다. G0 게이트는 집계 C다(D-029, D-031).
+- (d) 표본 수.
+  - 원래(8.2): "공격 600 + 정상 300", 128k "100개 표본".
+  - 결정(강지의): (타깃, 길이)마다 공격 600 + 정상 300이다(SPEC 8.1). T1 128k는 공격 100 + 정상 0이고, 길이는 D-014대로 129,024토큰이다.
+- (e) 구현 확인. 계획서와 같고 기록용이다.
+  - ledger는 계획서 8.2·6.4대로 SDPA prefill과 eager decode로 얻는다. 출력도 이 경로가 만든다.
+  - attention 행은 같은 q·K로 fp32 softmax를 따로 계산해 128토큰 블록으로 합산한다. 첫 토큰 행은 prefill 마지막 위치에서 얻는다(SPEC 4.3).
+  - tiny 모델 CPU fp32에서 eager attention과의 차이는 2.2×10⁻⁸ 이하다 \[측정\].
+  - 65,536토큰을 넘는 프롬프트는 16,384토큰 단위 chunked prefill을 쓴다(128k 메모리).
+- 영향: E0.1, E0.2(E0.1 Record와 calib 분할 재사용), G0 일정(동결 데이터로 다시 실행), Fig. 9 초안. SPEC 4.3·4.5·7.1·8.1·9.2·11절 수정.
+
 ### D-002 collaborator는 연구 구현에 관여하지 않는다
 
 - 날짜 2026-10-10 · 상태 **결정** · 관련: 계획서 12.1절 4번, 구축 계획 4절
